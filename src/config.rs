@@ -1,0 +1,50 @@
+//! Persisted UI preferences (theme, refresh rate, sort...). Stored as JSON
+//! in the platform config dir under the app's name. Command-line flags win.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::brand::APP_NAME;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub theme: Option<String>,
+    pub interval: Option<f64>,
+    pub sort: Option<String>,
+    pub sort_desc: Option<bool>,
+    pub full_cmd: Option<bool>,
+}
+
+pub fn path() -> Option<PathBuf> {
+    if let Some(p) = crate::brand::env("CONFIG") {
+        return Some(PathBuf::from(p));
+    }
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    }?;
+    Some(base.join(APP_NAME).join("config.json"))
+}
+
+pub fn load() -> Config {
+    path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Best effort; a read-only home (containers) is fine.
+pub fn save(c: &Config) {
+    let Some(p) = path() else { return };
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(c) {
+        let _ = std::fs::write(p, s);
+    }
+}

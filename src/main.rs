@@ -1,11 +1,13 @@
 mod backend;
 mod brand;
 mod collector;
+mod config;
 mod fmt;
 mod host;
 mod model;
 mod pidmap;
 mod report;
+mod serve;
 mod ui;
 #[cfg(windows)]
 mod winpdh;
@@ -19,9 +21,9 @@ use collector::Collector;
 #[derive(Parser, Debug)]
 #[command(name = brand::APP_NAME, version, about = "Terminal GPU monitor. Single binary; works on bare metal, in containers, WSL and Windows.")]
 pub struct Cli {
-    /// Refresh interval in seconds.
-    #[arg(short, long, default_value_t = 1.0)]
-    interval: f64,
+    /// Refresh interval in seconds [default: 1, or the last value used].
+    #[arg(short, long)]
+    interval: Option<f64>,
 
     /// Print a one-shot summary and exit.
     #[arg(short = '1', long)]
@@ -54,11 +56,17 @@ pub struct Cli {
     /// Print what was detected (libraries, environment, PID mapping) and exit.
     #[arg(long)]
     diagnose: bool,
+
+    /// Run headless and serve Prometheus metrics (/metrics) and JSON (/json).
+    #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:9465", value_name = "ADDR")]
+    serve: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let interval = Duration::from_secs_f64(cli.interval.clamp(0.1, 60.0));
+    let cfg = config::load();
+    let secs = cli.interval.or(cfg.interval).unwrap_or(1.0);
+    let interval = Duration::from_secs_f64(secs.clamp(0.1, 60.0));
 
     let detected = backend::detect(cli.demo);
     let (mut collector, info) = Collector::new(detected);
@@ -84,5 +92,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    ui::run(collector, info, interval, &cli)
+    if let Some(addr) = &cli.serve {
+        return serve::run(collector, info, interval, addr);
+    }
+
+    ui::run(collector, info, interval, &cli, cfg)
 }

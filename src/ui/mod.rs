@@ -18,6 +18,7 @@ use ratatui::widgets::TableState;
 
 use crate::Cli;
 use crate::collector::{Collector, Sampler};
+use crate::config::Config;
 use crate::host::{KillSignal, send_signal};
 use crate::model::{PidMapping, ProcRow, Snapshot, SystemInfo};
 
@@ -157,14 +158,20 @@ pub struct App {
 }
 
 impl App {
-    fn new(info: SystemInfo, interval: Duration, cli: &Cli) -> Self {
+    fn new(info: SystemInfo, interval: Duration, cli: &Cli, cfg: &Config) -> Self {
         let n = info.gpus.len();
         let theme = cli
             .theme
-            .as_deref()
-            .or(crate::brand::env("THEME").as_deref())
-            .and_then(theme::by_name)
+            .clone()
+            .or(crate::brand::env("THEME"))
+            .or(cfg.theme.clone())
+            .and_then(|t| theme::by_name(&t))
             .unwrap_or(0);
+        let sort = cfg
+            .sort
+            .as_deref()
+            .and_then(|s| SortKey::CYCLE.iter().copied().find(|k| k.label().eq_ignore_ascii_case(s)))
+            .unwrap_or(SortKey::GpuMem);
         App {
             hist: (0..n).map(|_| GpuHist::default()).collect(),
             info,
@@ -174,12 +181,12 @@ impl App {
             sel_gpu: 0,
             table: TableState::default().with_selected(Some(0)),
             sel_key: None,
-            sort: SortKey::GpuMem,
-            sort_desc: true,
+            sort,
+            sort_desc: cfg.sort_desc.unwrap_or(sort.default_desc()),
             filter: String::new(),
             filter_edit: false,
             gpu_only: false,
-            full_cmd: false,
+            full_cmd: cfg.full_cmd.unwrap_or(false),
             tagged: HashSet::new(),
             popup: None,
             toast: None,
@@ -521,9 +528,9 @@ impl App {
     }
 }
 
-pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli) -> anyhow::Result<()> {
+pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli, cfg: Config) -> anyhow::Result<()> {
     let sampler = Sampler::spawn(collector, interval);
-    let mut app = App::new(info, interval, cli);
+    let mut app = App::new(info, interval, cli, &cfg);
 
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
@@ -575,5 +582,12 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
+    crate::config::save(&Config {
+        theme: Some(app.theme().name.to_string()),
+        interval: Some(app.interval.as_secs_f64()),
+        sort: Some(app.sort.label().to_string()),
+        sort_desc: Some(app.sort_desc),
+        full_cmd: Some(app.full_cmd),
+    });
     res
 }
