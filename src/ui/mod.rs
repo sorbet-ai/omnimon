@@ -10,6 +10,7 @@ mod overview;
 mod popups;
 mod procs;
 mod theme;
+mod timeline;
 mod widgets;
 
 pub use gfx::ChartStyle;
@@ -47,15 +48,17 @@ enum Tab {
     Overview,
     Charts,
     Details,
+    Events,
 }
 
 impl Tab {
-    const ALL: [Tab; 3] = [Tab::Overview, Tab::Charts, Tab::Details];
+    const ALL: [Tab; 4] = [Tab::Overview, Tab::Charts, Tab::Details, Tab::Events];
     fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Charts => "Charts",
             Tab::Details => "Details",
+            Tab::Events => "Events",
         }
     }
     fn step(self, d: isize) -> Tab {
@@ -209,6 +212,8 @@ struct App {
     chart_style: ChartStyle,
     /// Bumped on every new snapshot; keys the chart image cache.
     version: u64,
+    events: std::collections::VecDeque<crate::events::Event>,
+    events_scroll: usize,
     quit: bool,
 }
 
@@ -247,6 +252,8 @@ impl App {
             gfx,
             chart_style,
             version: 0,
+            events: Default::default(),
+            events_scroll: 0,
             quit: false,
         }
     }
@@ -291,6 +298,10 @@ impl App {
 
     fn ingest(&mut self, s: Snapshot) {
         self.hist.push(&self.info, &s);
+        self.events.extend(s.events.iter().cloned());
+        while self.events.len() > 2000 {
+            self.events.pop_front();
+        }
         self.tagged.retain(|k| s.processes.iter().any(|p| p.key() == *k));
         self.snap = Some(s);
         self.version += 1;
@@ -409,6 +420,18 @@ impl App {
             KeyCode::Char('1') => self.tab = Tab::Overview,
             KeyCode::Char('2') => self.tab = Tab::Charts,
             KeyCode::Char('3') => self.tab = Tab::Details,
+            KeyCode::Char('4') => self.tab = Tab::Events,
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') | KeyCode::PageUp | KeyCode::PageDown
+                if self.tab == Tab::Events =>
+            {
+                let d: isize = match k.code {
+                    KeyCode::Up | KeyCode::Char('k') => -1,
+                    KeyCode::Down | KeyCode::Char('j') => 1,
+                    KeyCode::PageUp => -20,
+                    _ => 20,
+                };
+                self.events_scroll = self.events_scroll.saturating_add_signed(d).min(self.events.len().saturating_sub(1));
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
             KeyCode::PageUp => self.move_sel(-10),

@@ -115,7 +115,7 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
         b = b.title_bottom(Line::from(s(format!(" ▲ {} ", alerts.join(", ")), t.warn)).right_aligned());
     }
     if let Some(txt) = spill_text(sm) {
-        let c = if sm.spill.level == SpillLevel::Spilling { t.crit } else { t.warn };
+        let c = if sm.spill.level == SpillLevel::Spilling { t.crit } else { t.dim };
         b = b.title_bottom(Line::from(s(format!(" ▼ {txt} "), c).bold()).right_aligned());
     }
     if let Some(e) = &sm.error {
@@ -282,11 +282,7 @@ fn compact(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         f.render_widget(Paragraph::new(s(format!("{:>4}", fmt::pct(sm.util_gpu)), t.fg)), cols[4]);
         f.render_widget(Paragraph::new(s(" MEM", t.dim)), Rect { width: cols[5].width.saturating_sub(1), ..cols[5] });
         f.render_widget(GradBar { frac: sm.mem_frac(), grad: t.mem, track: t.track }, cols[6]);
-        let mem_c = severity_color(
-            t,
-            if sm.spill.level == SpillLevel::Spilling { 2 } else { u8::from(sm.spill.level == SpillLevel::Pressure) },
-            t.fg,
-        );
+        let mem_c = severity_color(t, if sm.spill.level == SpillLevel::Spilling { 2 } else { 0 }, t.fg);
         f.render_widget(Paragraph::new(s(format!(" {}", mem_text(sm)), mem_c)), cols[7]);
         let temp = sm.temp.map(|v| s(format!("{v:>3}°C"), temp_color(t, v, g))).unwrap_or(s(" N/A", t.dim));
         f.render_widget(Paragraph::new(temp), cols[8]);

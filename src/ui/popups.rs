@@ -23,7 +23,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 pub(super) fn help(f: &mut Frame, app: &App) {
     let t = app.theme();
     let keys: &[(&str, &str)] = &[
-        ("1 2 3 / Tab", "overview · charts · details"),
+        ("1 2 3 4 / Tab", "overview · charts · details · events"),
         ("← → [ ]", "select GPU (or click a card)"),
         ("↑ ↓ j k PgUp PgDn", "move in process list (or wheel / click)"),
         ("s / S", "next / previous sort column (or click header)"),

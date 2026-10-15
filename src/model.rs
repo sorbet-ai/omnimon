@@ -407,4 +407,7 @@ pub struct Snapshot {
     pub host: HostSample,
     pub gpus: Vec<GpuSample>,
     pub processes: Vec<ProcRow>,
+    /// What changed since the previous snapshot.
+    #[serde(default)]
+    pub events: Vec<crate::events::Event>,
 }

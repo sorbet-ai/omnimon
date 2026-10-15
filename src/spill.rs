@@ -30,7 +30,7 @@ impl Default for Thresholds {
     fn default() -> Self {
         // Desktop compositors and session processes routinely keep 100-250 MiB
         // in shared memory, so the pressure threshold sits above that.
-        Thresholds { pressure: 0.95, spill_bytes: 512 << 20, spill_bytes_under_pressure: 256 << 20 }
+        Thresholds { pressure: 0.98, spill_bytes: 512 << 20, spill_bytes_under_pressure: 256 << 20 }
     }
 }
 
@@ -138,7 +138,7 @@ mod tests {
     fn desktop_shared_allocations_are_not_spill() {
         // dwm / csrss under VRAM pressure: 85 MiB and 223 MiB shared.
         let (mut a, mut b) = (row(1400 << 20, 85 << 20), row(34 << 20, 223 << 20));
-        let s = analyze(&gpu(), &sample(23 * GIB), &mut [&mut a, &mut b], &Thresholds::default());
+        let s = analyze(&gpu(), &sample(24 * GIB - GIB / 4), &mut [&mut a, &mut b], &Thresholds::default());
         assert_eq!(s.level, SpillLevel::Pressure);
     }
 
@@ -156,14 +156,14 @@ mod tests {
         let mut a = row(GIB, 300 << 20);
         let s = analyze(&gpu(), &sample(12 * GIB), &mut [&mut a], &Thresholds::default());
         assert_eq!(s.level, SpillLevel::None);
-        let s = analyze(&gpu(), &sample(23 * GIB + GIB / 2), &mut [&mut a], &Thresholds::default());
+        let s = analyze(&gpu(), &sample(24 * GIB - GIB / 4), &mut [&mut a], &Thresholds::default());
         assert_eq!(s.level, SpillLevel::Spilling);
     }
 
     #[test]
     fn pressure_without_measurements() {
         let mut a = ProcRow { usage: GpuProcess::default(), ..row(0, 0) };
-        let s = analyze(&gpu(), &sample(23 * GIB + GIB / 2), &mut [&mut a], &Thresholds::default());
+        let s = analyze(&gpu(), &sample(24 * GIB - GIB / 4), &mut [&mut a], &Thresholds::default());
         assert_eq!(s.level, SpillLevel::Pressure);
     }
 

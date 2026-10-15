@@ -21,6 +21,7 @@ pub struct Collector {
     host: Host,
     enricher: ProcEnricher,
     pub thresholds: spill::Thresholds,
+    prev: Option<Snapshot>,
 }
 
 impl Collector {
@@ -46,8 +47,15 @@ impl Collector {
             info.warnings.push("WSL: the driver doesn't expose per-process GPU data here".into());
         }
         let enricher = ProcEnricher::new(&info.gpus);
-        let c =
-            Collector { backends: d.backends, counts, gpus: info.gpus.clone(), host, enricher, thresholds: spill::Thresholds::default() };
+        let c = Collector {
+            backends: d.backends,
+            counts,
+            gpus: info.gpus.clone(),
+            host,
+            enricher,
+            thresholds: spill::Thresholds::default(),
+            prev: None,
+        };
         (c, info)
     }
 
@@ -82,12 +90,18 @@ impl Collector {
             g.spill = spill::analyze(&self.gpus[i], g, &mut mine, &self.thresholds);
         }
 
-        Snapshot {
+        let mut snap = Snapshot {
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
             host: self.host.sample(),
             gpus,
             processes: rows,
+            events: Vec::new(),
+        };
+        if let Some(prev) = &self.prev {
+            snap.events = crate::events::diff(prev, &snap);
         }
+        self.prev = Some(Snapshot { events: Vec::new(), ..snap.clone() });
+        snap
     }
 }
 

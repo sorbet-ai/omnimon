@@ -20,6 +20,7 @@ pub(super) fn draw(f: &mut Frame, app: &App) -> Hit {
         Tab::Overview => super::overview::draw(f, app, body, &mut hit),
         Tab::Charts => super::charts::draw(f, app, body, &mut hit),
         Tab::Details => super::details::draw(f, app, body),
+        Tab::Events => super::timeline::draw(f, app, body),
     }
     draw_footer(f, app, footer);
     if let Some((msg, _, err)) = &app.toast {
@@ -63,7 +64,7 @@ pub(super) fn severity(info: &GpuInfo, s: &GpuSample) -> u8 {
     if s.temp.is_some_and(|t| t + 3 >= slow) || s.throttle_severity() >= 2 {
         return 2;
     }
-    if s.temp.is_some_and(|t| t + 10 >= slow) || s.spill.level == SpillLevel::Pressure {
+    if s.temp.is_some_and(|t| t + 10 >= slow) {
         return 1;
     }
     0
@@ -143,19 +144,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             left.push(s(format!("  {n} "), t.dim));
             left.push(s(v.as_str(), t.fg));
         }
-    }
-    // The one thing worth shouting about from any view.
-    let spill = app.snap.as_ref().map(|s| s.gpus.iter().map(|g| g.spill.level).max().unwrap_or_default()).unwrap_or_default();
-    match spill {
-        SpillLevel::Spilling => {
-            left.push(Span::raw("  "));
-            left.push(Span::styled(" SPILL ", Style::new().fg(Color::Black).bg(t.crit).bold()));
-        }
-        SpillLevel::Pressure => {
-            left.push(Span::raw("  "));
-            left.push(Span::styled(" VRAM FULL ", Style::new().fg(Color::Black).bg(t.warn).bold()));
-        }
-        SpillLevel::None => {}
     }
     let lw: usize = left.iter().map(|s| s.width()).sum();
 
