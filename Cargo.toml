@@ -1,0 +1,26 @@
+[package]
+# The app name lives HERE and only here. Binary name, window title, env-var
+# prefix (NVTUI_*), config dir, etc. are all derived from CARGO_PKG_NAME.
+# To rename the app: change `name` below (and the README). That's it.
+name = "nvtui"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, good-looking terminal GPU monitor. Single binary, works in containers, WSL and Windows."
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
+libloading = "0.9.0"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sysinfo = "0.38.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
