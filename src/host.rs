@@ -120,7 +120,7 @@ impl Host {
             .map(|(gpu, p)| {
                 // Backends that already know the process (demo, OS counters) skip mapping.
                 let (local_pid, mapping) = if p.name.is_some() {
-                    (None, PidMapping::External)
+                    (None, PidMapping::Direct)
                 } else {
                     map.get(&p.pid).copied().unwrap_or((None, PidMapping::External))
                 };

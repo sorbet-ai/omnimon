@@ -34,7 +34,7 @@ impl Collector {
         if info.gpus.is_empty() {
             info.warnings.push("no GPUs found".into());
         }
-        if info.host.wsl && !info.gpus.is_empty() {
+        if info.host.wsl && info.gpus.iter().any(|g| g.vendor != crate::model::Vendor::Demo) {
             info.warnings.push("WSL: the driver doesn't expose per-process GPU data here".into());
         }
         (Collector { backends: d.backends, offsets, host }, info)
