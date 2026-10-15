@@ -166,6 +166,10 @@ enum Popup {
     Help,
     Process {
         key: (usize, u32),
+        /// Fetched once when the popup opens.
+        details: Option<Box<crate::host::ProcDetails>>,
+        /// Show the whole environment instead of the GPU-relevant part.
+        full_env: bool,
     },
     /// (gpu, driver pid, local pid, name) per target.
     Kill {
@@ -278,6 +282,10 @@ impl App {
     fn rows(&self) -> impl Iterator<Item = &ProcRow> {
         let all = self.procs();
         self.view.iter().filter_map(move |&i| all.get(i))
+    }
+
+    fn row_by_key(&self, key: (usize, u32)) -> Option<&ProcRow> {
+        self.procs().iter().find(|p| p.key() == key)
     }
 
     fn row(&self, n: usize) -> Option<&ProcRow> {
@@ -472,7 +480,8 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(key) = self.sel_key {
-                    self.popup = Some(Popup::Process { key });
+                    let details = self.row_by_key(key).and_then(|p| p.local_pid).and_then(crate::host::process_details).map(Box::new);
+                    self.popup = Some(Popup::Process { key, details, full_env: false });
                 }
             }
             KeyCode::Char('K') | KeyCode::Char('x') | KeyCode::Delete | KeyCode::F(9) => self.open_kill(),
@@ -523,12 +532,14 @@ impl App {
                     _ => self.popup = None,
                 }
             }
-            Popup::Process { .. } => {
-                self.popup = None;
-                if matches!(k.code, KeyCode::Char('K') | KeyCode::Char('x') | KeyCode::Delete | KeyCode::F(9)) {
+            Popup::Process { full_env, .. } => match k.code {
+                KeyCode::Char('e') => *full_env = !*full_env,
+                KeyCode::Char('K') | KeyCode::Char('x') | KeyCode::Delete | KeyCode::F(9) => {
+                    self.popup = None;
                     self.open_kill();
                 }
-            }
+                _ => self.popup = None,
+            },
             Popup::Help => self.popup = None,
         }
     }

@@ -213,3 +213,91 @@ pub fn send_signal(pid: u32, sig: KillSignal) -> Result<(), String> {
         }
     }
 }
+
+/// On-demand detail for one local process (process popup): ancestry,
+/// children, executable, working directory and environment.
+#[derive(Clone, Debug, Default)]
+pub struct ProcDetails {
+    /// Root first, the process itself last.
+    pub ancestors: Vec<(u32, String)>,
+    pub children: Vec<(u32, String)>,
+    pub exe: Option<String>,
+    pub cwd: Option<String>,
+    /// GPU-relevant variables first, then the rest; empty when unreadable.
+    pub env: Vec<(String, String)>,
+}
+
+/// Prefixes of environment variables that steer GPU work.
+const GPU_ENV: &[&str] = &[
+    "CUDA_", "NVIDIA_", "NCCL_", "HIP_", "ROCR_", "ROCM_", "HSA_", "GPU_", "ONEAPI_", "ZE_", "SYCL_", "PYTORCH_", "TORCH_", "TF_",
+    "XLA_", "JAX_", "OMP_NUM_THREADS", "LD_LIBRARY_PATH", "LD_PRELOAD", "VK_", "MESA_", "DXVK_", "MTL_", "METAL_",
+];
+
+pub fn is_gpu_env(key: &str) -> bool {
+    GPU_ENV.iter().any(|p| key.starts_with(p))
+}
+
+/// Takes a full process-table refresh (tens of ms), so only call on demand.
+pub fn process_details(pid: u32) -> Option<ProcDetails> {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let me = Pid::from_u32(pid);
+    let full = ProcessRefreshKind::nothing().with_exe(UpdateKind::Always).with_cwd(UpdateKind::Always).with_environ(UpdateKind::Always);
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[me]), false, full);
+    let p = sys.process(me)?;
+    let name = |p: &sysinfo::Process| p.name().to_string_lossy().into_owned();
+
+    let mut ancestors = vec![(pid, name(p))];
+    let mut cur = p.parent();
+    while let Some(pp) = cur {
+        // Guard against cycles from PID reuse.
+        if ancestors.len() > 64 || ancestors.iter().any(|(q, _)| *q == pp.as_u32()) {
+            break;
+        }
+        let Some(q) = sys.process(pp) else { break };
+        ancestors.push((pp.as_u32(), name(q)));
+        cur = q.parent();
+    }
+    ancestors.reverse();
+
+    let mut children: Vec<(u32, String)> =
+        sys.processes().values().filter(|c| c.parent() == Some(me) && c.thread_kind().is_none()).map(|c| (c.pid().as_u32(), name(c))).collect();
+    children.sort();
+
+    let mut env: Vec<(String, String)> = p
+        .environ()
+        .iter()
+        .filter_map(|kv| {
+            let kv = kv.to_string_lossy();
+            let (k, v) = kv.split_once('=')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect();
+    env.sort_by(|a, b| is_gpu_env(&b.0).cmp(&is_gpu_env(&a.0)).then(a.0.cmp(&b.0)));
+
+    Some(ProcDetails {
+        ancestors,
+        children,
+        exe: p.exe().map(|e| e.display().to_string()),
+        cwd: p.cwd().map(|c| c.display().to_string()),
+        env,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn details_of_self() {
+        let d = process_details(std::process::id()).expect("own process is visible");
+        assert_eq!(d.ancestors.last().unwrap().0, std::process::id());
+        assert!(d.ancestors.len() >= 2, "has a parent: {:?}", d.ancestors);
+        assert!(d.exe.is_some());
+        assert!(!d.env.is_empty());
+        // GPU-relevant variables sort first.
+        if let Some(first_other) = d.env.iter().position(|(k, _)| !is_gpu_env(k)) {
+            assert!(d.env[first_other..].iter().all(|(k, _)| !is_gpu_env(k)));
+        }
+    }
+}

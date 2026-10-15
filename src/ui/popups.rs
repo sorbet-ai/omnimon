@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph};
 
 use super::draw::{block, s};
 use super::gfx::Series;
@@ -96,18 +96,21 @@ pub(super) fn kill(f: &mut Frame, app: &App) {
 
 pub(super) fn process(f: &mut Frame, app: &App) {
     let t = app.theme();
-    let Some(Popup::Process { key }) = &app.popup else { return };
-    let Some(p) = app.procs().iter().find(|p| p.key() == *key) else { return };
+    let Some(Popup::Process { key, details, full_env }) = &app.popup else { return };
+    let Some(p) = app.row_by_key(*key) else { return };
     let u = &p.usage;
     let area = f.area();
-    let r = centered(area, area.width.saturating_sub(8).min(110), 22.min(area.height));
+    let r = centered(area, area.width.saturating_sub(8).min(120), area.height.saturating_sub(2).min(36));
     f.render_widget(Clear, r);
-    let b = block(t, true).title_top(Line::from(vec![
-        s(format!(" {} ", p.name), t.title).bold(),
-        s(format!("pid {} · gpu {} ", p.local_pid.unwrap_or(p.pid()), p.gpu), t.dim),
-    ]));
+    let b = block(t, true)
+        .title_top(Line::from(vec![
+            s(format!(" {} ", p.name), t.title).bold(),
+            s(format!("pid {} · gpu {} ", p.local_pid.unwrap_or(p.pid()), p.gpu), t.dim),
+        ]))
+        .title_bottom(Line::from(vec![s(" e ", t.accent).bold(), s("environment  ", t.dim), s("K ", t.accent).bold(), s("kill  ", t.dim), s("esc ", t.accent).bold(), s("close ", t.dim)]).right_aligned());
     let inner = b.inner(r).inner(Margin { horizontal: 1, vertical: 0 });
     f.render_widget(b, r);
+    let w = inner.width as usize;
 
     let mapping = match p.mapping {
         PidMapping::Direct => "same PID namespace".to_string(),
@@ -115,31 +118,23 @@ pub(super) fn process(f: &mut Frame, app: &App) {
         PidMapping::Guessed => format!("driver PID {} → local PID {} (heuristic match)", p.pid(), p.local_pid.unwrap_or(0)),
         PidMapping::External => format!("driver PID {} is outside this PID namespace", p.pid()),
     };
-    let kv = |k: &str, v: String| Line::from(vec![s(format!("{k:<10}"), t.dim), s(v, t.fg)]);
-    let mut lines = vec![
-        kv("user", p.user.clone().unwrap_or_else(|| "-".into())),
-        kv(
-            "type",
-            match u.kind {
-                ProcKind::Compute => "compute",
-                ProcKind::Graphics => "graphics",
-                ProcKind::Both => "compute + graphics",
-            }
-            .into(),
-        ),
-        kv("pid", mapping),
-        kv("gpu mem", u.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into())),
-    ];
+    let kv = |k: &str, v: String| Line::from(vec![s(format!("{k:<10}"), t.dim), s(fmt::truncate(&v, w.saturating_sub(10)), t.fg)]);
+    let kind = match u.kind {
+        ProcKind::Compute => "compute",
+        ProcKind::Graphics => "graphics",
+        ProcKind::Both => "compute + graphics",
+    };
+    let mut lines = vec![kv("user", p.user.clone().unwrap_or_else(|| "-".into())), kv("type", kind.into()), kv("pid", mapping)];
+    lines.push(kv("gpu mem", u.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into())));
     if let Some(sh) = u.gpu_mem_shared {
-        let line = if p.spilling {
+        lines.push(if p.spilling {
             Line::from(vec![
                 s(format!("{:<10}", "sys mem"), t.dim),
-                s(format!("{} — spilled out of VRAM, reached over PCIe", fmt::bytes(sh)), t.crit).bold(),
+                s(format!("{} spilled out of VRAM, reached over PCIe", fmt::bytes(sh)), t.crit).bold(),
             ])
         } else {
             kv("sys mem", fmt::bytes(sh))
-        };
-        lines.push(line);
+        });
     }
     lines.push(kv(
         "gpu util",
@@ -154,20 +149,61 @@ pub(super) fn process(f: &mut Frame, app: &App) {
             p.runtime.map(fmt::duration).unwrap_or("-".into())
         ),
     ));
-    lines.push(Line::default());
+    if let Some(d) = details {
+        // Ancestry, trimmed from the root end when it doesn't fit.
+        let chain: Vec<String> = d.ancestors.iter().map(|(pid, n)| format!("{n}({pid})")).collect();
+        let mut tree = chain.join(" › ");
+        let room = w.saturating_sub(10);
+        if tree.chars().count() > room {
+            let tail: String = tree.chars().rev().take(room.saturating_sub(1)).collect::<Vec<_>>().into_iter().rev().collect();
+            tree = format!("…{tail}");
+        }
+        lines.push(kv("tree", tree));
+        if !d.children.is_empty() {
+            let names: Vec<String> = d.children.iter().take(6).map(|(pid, n)| format!("{n}({pid})")).collect();
+            let more = d.children.len().saturating_sub(6);
+            lines.push(kv("children", format!("{}{}", names.join(", "), if more > 0 { format!(" +{more}") } else { String::new() })));
+        }
+        if let Some(e) = &d.exe {
+            lines.push(kv("exe", e.clone()));
+        }
+        if let Some(c) = &d.cwd {
+            lines.push(kv("cwd", c.clone()));
+        }
+    }
     lines.push(Line::from(s("command", t.dim)));
-    let text_h = (lines.len() as u16).min(inner.height);
-    f.render_widget(Paragraph::new(lines), Rect { height: text_h, ..inner });
-    let room = inner.height.saturating_sub(text_h);
-    let cmd_h = (p.cmdline.chars().count() as u16).div_ceil(inner.width.max(1)).clamp(1, 4).min(room);
-    let cmd_area = Rect { y: inner.y + text_h, height: cmd_h, ..inner };
-    f.render_widget(Paragraph::new(s(p.cmdline.as_str(), t.accent)).wrap(Wrap { trim: false }), cmd_area);
+    let cmd_rows = (p.cmdline.chars().count()).div_ceil(w.max(1)).clamp(1, 3);
+    let wrapped: Vec<String> = p.cmdline.chars().collect::<Vec<_>>().chunks(w.max(1)).take(cmd_rows).map(|c| c.iter().collect()).collect();
+    for l in wrapped {
+        lines.push(Line::from(s(l, t.accent)));
+    }
+
+    // Environment: GPU-relevant variables, or everything with `e`.
+    if let Some(d) = details {
+        let gpu_vars = d.env.iter().filter(|(k, _)| crate::host::is_gpu_env(k)).count();
+        let header = if d.env.is_empty() {
+            "environment (not readable)".to_string()
+        } else if *full_env {
+            format!("environment · all {} variables", d.env.len())
+        } else {
+            format!("environment · {gpu_vars} GPU-related of {}", d.env.len())
+        };
+        lines.push(Line::default());
+        lines.push(Line::from(s(header, t.dim)));
+        for (k, v) in d.env.iter().filter(|(k, _)| *full_env || crate::host::is_gpu_env(k)) {
+            let c = if crate::host::is_gpu_env(k) { t.accent2 } else { t.fg };
+            let text = fmt::truncate(&format!("{k}={v}"), w);
+            lines.push(Line::from(s(text, c)));
+        }
+    }
 
     // History charts below, if there's room.
-    let top = cmd_area.y + cmd_area.height + 1;
+    let text_h = (lines.len() as u16).min(inner.height);
+    f.render_widget(Paragraph::new(lines), Rect { height: text_h, ..inner });
+    let top = inner.y + text_h + 1;
     let bottom = inner.y + inner.height;
     let Some(h) = app.hist.procs.get(key) else { return };
-    if top + 3 > bottom {
+    if top + 4 > bottom {
         return;
     }
     let chart = Rect { y: top, height: bottom - top, ..inner };
