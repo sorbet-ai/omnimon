@@ -586,12 +586,11 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli
                 app.ingest(s);
                 dirty = true;
             }
-            if let Some((_, t, _)) = &app.toast {
-                if t.elapsed() > Duration::from_secs(3) {
+            if let Some((_, t, _)) = &app.toast
+                && t.elapsed() > Duration::from_secs(3) {
                     app.toast = None;
                     dirty = true;
                 }
-            }
             // Clock in the header ticks once a second even when paused.
             if last_draw.elapsed() >= Duration::from_secs(1) {
                 dirty = true;

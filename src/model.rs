@@ -4,6 +4,8 @@
 
 use serde::Serialize;
 
+// Some variants are only constructed on some platforms.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Vendor {
@@ -217,6 +219,7 @@ impl GpuSample {
 }
 
 /// How a driver-reported PID was mapped to a process we can see.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PidMapping {

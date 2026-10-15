@@ -30,7 +30,6 @@ macro_rules! call {
 enum M {
     Util,
     MemV2,
-    MemV1,
     Bar1,
     Temp,
     TempMem,
@@ -489,11 +488,10 @@ fn list_procs(h: nvmlDevice_t, v3: ProcFn, v2: ProcFn, v1: ProcFn, v3_stride: us
             if pid == 0 || pid > (1 << 30) {
                 return None;
             }
-            if let Some(g) = gi {
-                if g != u32::MAX && g > 64 {
+            if let Some(g) = gi
+                && g != u32::MAX && g > 64 {
                     return None;
                 }
-            }
             out.push(RawProc {
                 pid,
                 mem: (mem != NVML_VALUE_NOT_AVAILABLE).then_some(mem),

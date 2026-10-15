@@ -98,13 +98,7 @@ impl Widget for AreaChart<'_> {
                     continue;
                 }
                 let (lt, rt) = if self.inverted { (&LEFT_DOWN, &RIGHT_DOWN) } else { (&LEFT_UP, &RIGHT_UP) };
-                let mut bits = 0u8;
-                for i in 0..ld {
-                    bits |= lt[i];
-                }
-                for i in 0..rd {
-                    bits |= rt[i];
-                }
+                let bits = lt[..ld].iter().chain(&rt[..rd]).fold(0u8, |b, d| b | d);
                 let ch = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
                 let y = if self.inverted { area.y + row as u16 } else { area.y + (h - 1 - row) as u16 };
                 let col = self.grad.at((row as f64 + 0.5) / h as f64);

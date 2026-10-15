@@ -191,11 +191,10 @@ pub fn truecolor_supported() -> bool {
     if let Some(v) = crate::brand::env("COLOR") {
         return v != "256";
     }
-    if let Ok(c) = std::env::var("COLORTERM") {
-        if c.contains("truecolor") || c.contains("24bit") {
+    if let Ok(c) = std::env::var("COLORTERM")
+        && (c.contains("truecolor") || c.contains("24bit")) {
             return true;
         }
-    }
     if cfg!(windows) {
         // Windows Terminal and modern conhost both handle 24-bit SGR.
         return true;
@@ -203,11 +202,10 @@ pub fn truecolor_supported() -> bool {
     if std::env::var_os("WT_SESSION").is_some() {
         return true;
     }
-    if let Ok(t) = std::env::var("TERM_PROGRAM") {
-        if ["iTerm.app", "WezTerm", "vscode", "ghostty", "Hyper", "Tabby", "rio"].contains(&t.as_str()) {
+    if let Ok(t) = std::env::var("TERM_PROGRAM")
+        && ["iTerm.app", "WezTerm", "vscode", "ghostty", "Hyper", "Tabby", "rio"].contains(&t.as_str()) {
             return true;
         }
-    }
     let term = std::env::var("TERM").unwrap_or_default();
     term.contains("truecolor") || term.contains("24bit") || term.contains("kitty") || term.contains("ghostty") || term.contains("alacritty") || term.contains("foot")
 }

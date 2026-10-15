@@ -29,7 +29,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let w = (msg.chars().count() as u16 + 4).min(area.width);
         let r = Rect { x: area.x + area.width - w, y: footer.y.saturating_sub(1), width: w, height: 1 };
         f.render_widget(Clear, r);
-        let st = if *err { Style::new().fg(Color::Black).bg(t.crit) } else { Style::new().fg(Color::Black).bg(t.accent) };
+        let st = if *err { Style::new().fg(Color::Black).bg(t.crit) } else { Style::new().fg(Color::Black).bg(t.ok) };
         f.render_widget(Paragraph::new(format!("  {msg}  ")).style(st.bold()), r);
     }
     match &app.popup {
@@ -253,13 +253,11 @@ fn gpu_title<'a>(app: &App, i: usize, compact: bool) -> Line<'a> {
         if let Some(m) = g.memory_total {
             meta.push(fmt::bytes(m));
         }
-        if let Some(snap) = &app.snap {
-            if let Some(sm) = snap.gpus.get(i) {
-                if let (Some(gn), Some(w)) = (sm.pcie_gen, sm.pcie_width) {
+        if let Some(snap) = &app.snap
+            && let Some(sm) = snap.gpus.get(i)
+                && let (Some(gn), Some(w)) = (sm.pcie_gen, sm.pcie_width) {
                     meta.push(format!("PCIe {gn}×{w}"));
                 }
-            }
-        }
         if !meta.is_empty() {
             v.push(s(format!("  {}", meta.join(" · ")), t.dim));
         }
@@ -385,12 +383,11 @@ fn draw_gpu_card(f: &mut Frame, app: &mut App, i: usize, area: Rect) {
     if left.height as usize > nbars {
         let y = left.y + nbars as u16;
         let mut info = Vec::new();
-        if nbars < 5 {
-            if let Some(c) = sm.clock_sm.or(sm.clock_graphics) {
+        if nbars < 5
+            && let Some(c) = sm.clock_sm.or(sm.clock_graphics) {
                 info.push(s("SM ", t.dim));
                 info.push(s(format!("{c}"), t.fg));
             }
-        }
         if let Some(c) = sm.clock_mem {
             info.push(s(" MEM ", t.dim));
             info.push(s(format!("{c}"), t.fg));
@@ -798,8 +795,7 @@ fn draw_charts(f: &mut Frame, app: &mut App, area: Rect) {
         Unit,
         Auto,
     }
-    let charts = vec![
-        C { title: "GPU utilization".into(), value: pct(sm.util_gpu), data: &h.util, mirror: None, grad: t.util, grad2: t.util, scale: Scale::Unit },
+    let charts = [C { title: "GPU utilization".into(), value: pct(sm.util_gpu), data: &h.util, mirror: None, grad: t.util, grad2: t.util, scale: Scale::Unit },
         C {
             title: "Memory".into(),
             value: match (sm.mem_used, sm.mem_total) {
@@ -858,8 +854,7 @@ fn draw_charts(f: &mut Frame, app: &mut App, area: Rect) {
             grad: t.mem,
             grad2: t.power,
             scale: Scale::Auto,
-        },
-    ];
+        }];
     let (cols, rows) = if area.width >= 150 { (3, 2) } else if area.width >= 90 { (2, 3) } else { (1, 6) };
     let row_areas = Layout::vertical(vec![Constraint::Fill(1); rows]).split(area);
     for (k, c) in charts.iter().enumerate() {

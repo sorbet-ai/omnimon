@@ -1,0 +1,95 @@
+# Backend notes
+
+Research notes for existing and future backends: where each metric comes
+from, what needs privileges, and what's been verified. "Verified" means run on
+real hardware during development.
+
+## NVIDIA (NVML), verified on RTX 4090: Windows 11, WSL2, Docker Desktop
+
+- Library search: `$NVTUI_NVML_PATH`, `libnvidia-ml.so.1`, `libnvidia-ml.so`,
+  `/usr/lib/wsl/lib`, distro lib dirs, `/usr/local/nvidia/lib64`
+  (device plugin), `/home/kubernetes/bin/nvidia/lib64` (GKE),
+  `/run/nvidia/driver/...` (GPU operator), versioned `libnvidia-ml.so.<ver>`;
+  Windows: `nvml.dll`, `System32`, `NVSMI`.
+- Process info layouts: v1 `{pid, mem}` 16 B; v2/v3 `{pid, mem, gi, ci}` 24 B;
+  r530 v3 adds `usedGpuCcProtectedMemory` → 32 B (identified like nvitop: has
+  `nvmlDeviceGetConfComputeMemSizeInfo` but not
+  `nvmlDeviceGetRunningProcessDetailList`). Parsed with sanity checks and a
+  fallback stride.
+- `nvmlDeviceGetPcieThroughput` blocks ~20 ms per call; GPUs are sampled in
+  parallel threads.
+- `nvmlDeviceGetProcessUtilization` is queried with a ~1 s lookback.
+- WDDM (Windows): per-process memory is `NVML_VALUE_NOT_AVAILABLE`; filled in
+  from WDDM performance counters (`src/winpdh.rs`).
+- WSL2: no process lists at all (driver limitation; nvidia-smi shows none).
+
+### Not yet implemented
+- **MIG**: `nvmlDeviceGetMigMode` → `nvmlDeviceGetMaxMigDeviceCount` →
+  `nvmlDeviceGetMigDeviceHandleByIndex` (skip `NOT_FOUND` gaps). Per-instance
+  memory works; utilization doesn't (use GPM). Process entries carry
+  `gpuInstanceId`/`computeInstanceId` (already parsed into
+  `GpuProcess::gpu_instance`).
+- **GPM** (Hopper+): `nvmlGpmQueryDeviceSupport`, two `nvmlGpmSampleGet`
+  ≥100 ms apart, `nvmlGpmMetricsGet` for SM occupancy (3), tensor activity (5),
+  DRAM bandwidth (10), FP16/32/64 util (11-13). Gate on the support probe.
+- **Instant power**: `nvmlDeviceGetFieldValues` with `NVML_FI_DEV_POWER_INSTANT`
+  (Ampere+ `GetPowerUsage` is a 1 s average). Verify the field id against nvml.h.
+- `nvmlDeviceGetRunningProcessDetailList` (r550+, struct-versioned): avoids
+  layout guessing entirely.
+- Xid / ECC events via `nvmlEventSetCreate` (an event timeline in the UI).
+
+## Apple Silicon, verified on M4 Pro (macOS 26)
+
+- `IOAccelerator` → `PerformanceStatistics`: `Device Utilization %`,
+  `Renderer/Tiler Utilization %`, `In use system memory`, `Alloc system memory`;
+  `model`, `gpu-core-count`.
+- Per process: children `AGXDeviceUserClient` with `IOUserClientCreator`
+  ("pid N, name") and `AppUsage[].accumulatedGPUTime` (ns). Δ/Δt = GPU %.
+  There's no per-process memory.
+- IOReport (`/usr/lib/libIOReport.dylib`, private, dlopen'd from the shared
+  cache): `Energy Model` channel `GPU Energy` (unit label mJ/uJ/nJ) → watts;
+  `GPU Stats / GPU Performance States` channel `GPUPH` residencies × DVFS table
+  from IORegistry `pmgr` → `voltage-states9` (u32 freq, u32 voltage pairs; Hz on
+  M4) → average MHz.
+- Temperature: HID event system (`PrimaryUsagePage 0xff00`, `PrimaryUsage 5`)
+  `PMU tdie*` sensors, max taken. No GPU-specific sensor on M4.
+- Private APIs change with chips and OS releases; every field is optional.
+
+## AMD on Linux, experimental (`src/backend/amd.rs`)
+
+- sysfs (no root): `gpu_busy_percent`, `mem_busy_percent` (dGPU only),
+  `mem_info_vram_{used,total}`, `mem_info_gtt_*` (APUs: VRAM is a small
+  carve-out, real usage is GTT), `pp_dpm_{sclk,mclk}` (`*` marks the level),
+  `current_link_{speed,width}`, `product_name`, `unique_id`.
+- hwmon: `temp{1,2,3}_input` labelled edge/junction/mem (m°C), `power1_average`
+  or `power1_input` (µW, APUs use input), `power1_cap`, `fan1_input`, `pwm1`,
+  `freq1_input` (Hz, instantaneous sclk).
+- `gpu_metrics` binary blob (header `u16 size, u8 format, u8 content`;
+  v1.x dGPU, v2.x/v3.x APU): richer data, not parsed yet.
+- Per process: DRM fdinfo (`src/backend/drm_fdinfo.rs`), dedupe by
+  `(drm-pdev, drm-client-id)`, keys `drm-engine-{gfx,compute,dma,enc,dec,...}`
+  ns, `drm-memory-vram` / `drm-resident-vram`. Only processes we can ptrace-read
+  (own user unless root).
+- AMD SMI (`libamd_smi.so`) could be dlopened for Instinct parts; the ABI
+  changes between ROCm releases.
+
+## Intel on Linux (not implemented)
+
+- fdinfo: i915 `drm-engine-{render,copy,video,video-enhance}` ns (+
+  `drm-engine-capacity-*`); xe `drm-cycles-*` / `drm-total-cycles-*`
+  (util = Δcycles/Δtotal). Device util = sum over clients unless PMU access.
+- sysfs freq: `gt_act_freq_mhz` / `gt/gt0/rps_act_freq_mhz`; xe
+  `device/tile0/gt0/freq0/act_freq`. hwmon for dGPU power/temp/fans.
+- PMU (`perf_event_open`, intel_gpu_top) needs CAP_PERFMON; avoid by default.
+
+## Windows, any vendor (partially implemented)
+
+- `\GPU Engine(*)\Utilization Percentage`, instance
+  `pid_<pid>_luid_0x<hi>_0x<lo>_phys_<n>_eng_<m>_engtype_<type>`; per process =
+  max over engines (Task Manager's rule).
+- `\GPU Process Memory(*)\Dedicated Usage` / `Shared Usage`.
+- `\GPU Adapter Memory(*)\Dedicated Usage` for device totals.
+- LUID → PCI via `D3DKMTEnumAdapters2` + `D3DKMTQueryAdapterInfo
+  (KMTQAITYPE_ADAPTERADDRESS)`. Implemented in `src/winpdh.rs` and used to
+  enrich NVML. A standalone WDDM backend would also cover AMD and Intel on
+  Windows (add ADLX for AMD clocks, temperatures and power).

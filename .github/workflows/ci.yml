@@ -1,0 +1,58 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-14, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - name: Test
+        if: ${{ !contains(matrix.target, 'aarch64-unknown-linux') }}
+        run: cargo test
+      - name: Clippy
+        if: ${{ !contains(matrix.target, 'aarch64-unknown-linux') }}
+        run: cargo clippy -- -D warnings
+      - name: Build (zig, glibc 2.17)
+        if: matrix.zig
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild --locked
+          cargo zigbuild --release --target ${{ matrix.target }}.2.17
+      - name: Build
+        if: ${{ !matrix.zig }}
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          NAME=$(sed -n 's/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p dist
+          EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
+          cp "target/${{ matrix.target }}/release/$NAME$EXT" "dist/$NAME-${{ matrix.target }}$EXT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
