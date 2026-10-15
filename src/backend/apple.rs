@@ -153,6 +153,102 @@ fn sysctl_string(name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
+// ---------------------------------------------------------------- HID temperature sensors
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOHIDEventSystemClientCreate(a: CFAllocatorRef) -> CFTypeRef;
+    fn IOHIDEventSystemClientSetMatching(c: CFTypeRef, m: CFDictionaryRef) -> i32;
+    fn IOHIDEventSystemClientCopyServices(c: CFTypeRef) -> CFArrayRef;
+    fn IOHIDServiceClientCopyProperty(s: CFTypeRef, key: CFStringRef) -> CFTypeRef;
+    fn IOHIDServiceClientCopyEvent(s: CFTypeRef, kind: i64, a: i32, b: i64) -> CFTypeRef;
+    fn IOHIDEventGetFloatValue(e: CFTypeRef, field: i32) -> f64;
+}
+
+const HID_TEMPERATURE: i64 = 15;
+
+/// Temperature sensors exposed through the (unprivileged) HID event system.
+struct Thermal {
+    client: Cf,
+    /// (name, service) for sensors that look like GPU dies.
+    gpu: Vec<CFTypeRef>,
+    /// SoC die sensors, used when no GPU-specific sensor exists.
+    die: Vec<CFTypeRef>,
+    _services: Cf,
+}
+
+impl Thermal {
+    fn new() -> Option<Self> {
+        use core_foundation_sys::dictionary::{CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks};
+        use core_foundation_sys::number::{CFNumberCreate, kCFNumberSInt32Type};
+        unsafe {
+            let client = Cf(IOHIDEventSystemClientCreate(kCFAllocatorDefault));
+            if client.0.is_null() {
+                return None;
+            }
+            // AppleVendor page 0xff00, usage 5 = temperature sensor.
+            let (page, usage) = (0xff00i32, 5i32);
+            let kp = cfstr("PrimaryUsagePage");
+            let ku = cfstr("PrimaryUsage");
+            let vp = Cf(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &page as *const i32 as *const c_void) as CFTypeRef);
+            let vu = Cf(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &usage as *const i32 as *const c_void) as CFTypeRef);
+            let keys = [kp.0, ku.0];
+            let vals = [vp.0, vu.0];
+            let m = Cf(CFDictionaryCreate(
+                kCFAllocatorDefault,
+                keys.as_ptr(),
+                vals.as_ptr(),
+                2,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            ) as CFTypeRef);
+            IOHIDEventSystemClientSetMatching(client.0, m.0 as CFDictionaryRef);
+            let services = Cf(IOHIDEventSystemClientCopyServices(client.0) as CFTypeRef);
+            if services.0.is_null() {
+                return None;
+            }
+            let key = cfstr("Product");
+            let (mut gpu, mut die) = (Vec::new(), Vec::new());
+            for svc in as_array(services.0) {
+                let name = Cf(IOHIDServiceClientCopyProperty(svc, key.0 as CFStringRef));
+                let name = as_string(name.0).unwrap_or_default();
+                if crate::brand::env("APPLE_SENSORS").is_some() {
+                    eprintln!("sensor: {name}");
+                }
+                let lower = name.to_lowercase();
+                if lower.contains("gpu") {
+                    gpu.push(svc);
+                } else if lower.contains("tdie") || lower.contains("die") {
+                    die.push(svc);
+                }
+            }
+            if gpu.is_empty() && die.is_empty() {
+                return None;
+            }
+            Some(Thermal { client, gpu, die, _services: services })
+        }
+    }
+
+    fn read(&self) -> Option<u32> {
+        let list = if self.gpu.is_empty() { &self.die } else { &self.gpu };
+        let _ = &self.client;
+        let vals: Vec<f64> = list
+            .iter()
+            .filter_map(|&svc| unsafe {
+                let ev = IOHIDServiceClientCopyEvent(svc, HID_TEMPERATURE, 0, 0);
+                if ev.is_null() {
+                    return None;
+                }
+                let v = IOHIDEventGetFloatValue(ev, (HID_TEMPERATURE << 16) as i32);
+                CFRelease(ev);
+                (v > 0.0 && v < 150.0).then_some(v)
+            })
+            .collect();
+        // Hottest sensor is what throttling reacts to.
+        vals.into_iter().fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v)))).map(|v| v.round() as u32)
+    }
+}
+
 // ---------------------------------------------------------------- IOReport
 
 type CopyChannels = unsafe extern "C" fn(CFStringRef, CFStringRef, u64, u64, u64) -> CFMutableDictionaryRef;
@@ -282,6 +378,7 @@ pub struct Apple {
     accel: IoObject,
     info: GpuInfo,
     report: Option<IoReport>,
+    thermal: Option<Thermal>,
     /// GPU DVFS frequencies in MHz, lowest first (excluding the off state).
     freqs: Vec<u32>,
     /// pid -> (accumulated GPU ns, when)
@@ -340,6 +437,7 @@ impl Apple {
             accel,
             info,
             report: IoReport::new(),
+            thermal: Thermal::new(),
             freqs,
             prev_gpu_time: HashMap::new(),
             os_version: sysctl_string("kern.osproductversion"),
@@ -429,6 +527,7 @@ impl Backend for Apple {
             }
         }
         s.mem_total = self.info.memory_total;
+        s.temp = self.thermal.as_ref().and_then(|t| t.read());
         if let Some(r) = self.report.as_mut().and_then(|r| r.read()) {
             s.power = r.gpu_watts;
             // Residency-weighted frequency over active states.

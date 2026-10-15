@@ -83,22 +83,31 @@ pub fn once(info: &SystemInfo, snap: &Snapshot, color: bool) {
 }
 
 fn procs_inline(snap: &Snapshot, gpu: usize, a: &Ansi) -> String {
-    snap.processes
-        .iter()
-        .filter(|p| p.gpu == gpu)
+    const MAX: usize = 5;
+    let mut ps: Vec<_> = snap.processes.iter().filter(|p| p.gpu == gpu).collect();
+    ps.sort_by(|x, y| {
+        (y.gpu_mem, y.sm_util.map(|v| (v * 100.0) as u64)).cmp(&(x.gpu_mem, x.sm_util.map(|v| (v * 100.0) as u64)))
+    });
+    let more = ps.len().saturating_sub(MAX);
+    let mut s = ps
+        .into_iter()
+        .take(MAX)
         .map(|p| {
             let name = p.name.split(['/', '\\']).next_back().unwrap_or(&p.name);
             let who = p.user.as_deref().map(|u| format!("{u}:")).unwrap_or_default();
-            format!(
-                "{}{}/{}({})",
-                a.c("2", who),
-                a.c("36", name),
-                p.pid,
-                p.gpu_mem.map(fmt::bytes_short).unwrap_or_else(|| "?".into())
-            )
+            let usage = match (p.gpu_mem, p.sm_util) {
+                (Some(m), _) => fmt::bytes_short(m),
+                (None, Some(u)) => format!("{u:.0}%"),
+                _ => "?".into(),
+            };
+            format!("{}{}/{}({usage})", a.c("2", who), a.c("36", name), p.pid)
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    if more > 0 {
+        s += &a.c("2", format!(" +{more} more"));
+    }
+    s
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -106,10 +115,7 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 fn chrono_now() -> String {
-    // Local time without a date/time dependency: HH:MM:SS UTC is good enough
-    // for a one-shot header.
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    format!("{:02}:{:02}:{:02} UTC", (secs / 3600) % 24, (secs / 60) % 60, secs % 60)
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 #[derive(serde::Serialize)]

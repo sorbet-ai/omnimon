@@ -204,12 +204,6 @@ impl GpuSample {
             _ => None,
         }
     }
-    pub fn power_frac(&self) -> Option<f64> {
-        match (self.power, self.power_limit) {
-            (Some(p), Some(l)) if l > 0.0 => Some(p / l),
-            _ => None,
-        }
-    }
     pub fn fan(&self) -> Option<u32> {
         if self.fans.is_empty() {
             None

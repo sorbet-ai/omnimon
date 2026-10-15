@@ -335,7 +335,7 @@ fn draw_gpu_card(f: &mut Frame, app: &mut App, i: usize, area: Rect) {
         ),
         (
             "PWR",
-            sm.power_frac(),
+            app.power_frac(i, &sm),
             t.power,
             match (sm.power, sm.power_limit) {
                 (Some(p), Some(l)) => format!("{p:.0}/{l:.0}W"),
@@ -367,7 +367,11 @@ fn draw_gpu_card(f: &mut Frame, app: &mut App, i: usize, area: Rect) {
             bars.push(("DEC", sm.dec_util.map(|v| v as f64 / 100.0), t.power, pct(sm.dec_util)));
         }
     }
+    // Core bars always show (N/A is information); optional ones only when the
+    // device reports them.
+    let mut bars: Vec<_> = bars.into_iter().enumerate().filter(|(k, b)| *k < 3 || b.1.is_some()).map(|(_, b)| b).collect();
     let nbars = (left.height as usize).saturating_sub(1).min(bars.len()).max(1);
+    bars.truncate(nbars);
     let val_w = 12u16;
     for (row, (label, frac, grad, val)) in bars.into_iter().take(nbars).enumerate() {
         let y = left.y + row as u16;
@@ -475,7 +479,7 @@ fn draw_gpu_compact(f: &mut Frame, app: &mut App, area: Rect) {
         let temp = sm.temp.map(|v| s(format!("{v:>3}°C"), temp_color(t, v, g))).unwrap_or(s(" N/A", t.dim));
         f.render_widget(Paragraph::new(temp), cols[8]);
         let pw = sm.power.map(|p| format!(" {p:>4.0}W")).unwrap_or(" N/A".into());
-        let pc = sm.power_frac().map(|v| t.power.at(v)).unwrap_or(t.dim);
+        let pc = app.power_frac(i, &sm).map(|v| t.power.at(v)).unwrap_or(t.dim);
         f.render_widget(Paragraph::new(s(pw, pc)), cols[9]);
         let n = cols[10].width as usize;
         let spark = Rect { x: cols[10].x + 1, width: cols[10].width.saturating_sub(1), ..cols[10] };

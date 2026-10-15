@@ -51,6 +51,8 @@ pub struct GpuHist {
     pub tx: Ring,
     pub enc: Ring,
     pub dec: Ring,
+    /// Highest power seen; the bar scale for GPUs without a power limit (Apple).
+    pub peak_power: f64,
 }
 
 #[derive(Default)]
@@ -201,6 +203,16 @@ impl App {
         }
     }
 
+    /// Power as a fraction of the limit, or of the peak seen if there's no limit.
+    pub fn power_frac(&self, i: usize, s: &crate::model::GpuSample) -> Option<f64> {
+        let p = s.power?;
+        let scale = s
+            .power_limit
+            .or(self.info.gpus.get(i)?.power_limit_max)
+            .unwrap_or(self.hist.get(i)?.peak_power.max(5.0));
+        Some((p / scale).min(1.0))
+    }
+
     pub fn theme(&self) -> &'static theme::Theme {
         &theme::THEMES[self.theme]
     }
@@ -211,11 +223,11 @@ impl App {
             let info = &self.info.gpus[i];
             h.util.push(g.util_gpu.map(|v| v as f64 / 100.0));
             h.mem.push(g.mem_frac());
-            let plim = g.power_limit.or(info.power_limit_max);
-            h.power.push(match (g.power, plim) {
-                (Some(p), Some(l)) if l > 0.0 => Some(p / l),
-                _ => None,
-            });
+            if let Some(p) = g.power {
+                h.peak_power = h.peak_power.max(p);
+            }
+            let scale = g.power_limit.or(info.power_limit_max).unwrap_or(h.peak_power.max(5.0));
+            h.power.push(g.power.map(|p| (p / scale).min(1.0)));
             let tmax = info.temp_shutdown.unwrap_or(100).max(1) as f64;
             h.temp.push(g.temp.map(|t| t as f64 / tmax));
             h.clock.push(match (g.clock_sm.or(g.clock_graphics), info.max_clock_sm.or(info.max_clock_graphics)) {
@@ -251,7 +263,9 @@ impl App {
                     || p.local_pid.is_some_and(|l| l.to_string() == f)
             })
             .collect();
-        let key = self.sort;
+        // Sorting by GPU memory when no process reports it (WDDM without
+        // counters, Apple) is useless; fall back to GPU utilization.
+        let key = if self.sort == SortKey::GpuMem && v.iter().all(|p| p.gpu_mem.is_none()) { SortKey::Sm } else { self.sort };
         v.sort_by(|a, b| {
             use std::cmp::Ordering as O;
             let num = |x: Option<f64>, y: Option<f64>| x.unwrap_or(-1.0).partial_cmp(&y.unwrap_or(-1.0)).unwrap_or(O::Equal);
