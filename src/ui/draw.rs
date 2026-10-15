@@ -35,6 +35,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.popup {
         Some(Popup::Help) => draw_help(f, app),
         Some(Popup::Kill { .. }) => draw_kill(f, app),
+        Some(Popup::Process { .. }) => draw_process(f, app),
         None => {}
     }
 }
@@ -1054,6 +1055,7 @@ fn draw_help(f: &mut Frame, app: &App) {
         ("/", "filter by command, user or PID (Esc clears)"),
         ("g", "only show processes on the selected GPU"),
         ("c", "toggle full command line"),
+        ("enter", "process details"),
         ("space", "tag process (for multi-kill)"),
         ("K  Del  F9", "signal tagged / selected process"),
         ("t", "cycle theme"),
@@ -1071,6 +1073,78 @@ fn draw_help(f: &mut Frame, app: &App) {
     let r = centered(f.area(), 72, lines.len() as u16 + 2);
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(lines).block(block(t, true).title_top(Line::from(s(" keys ", t.title).bold()))), r);
+}
+
+fn draw_process(f: &mut Frame, app: &App) {
+    let t = app.theme();
+    let Some(Popup::Process { gpu, pid }) = &app.popup else { return };
+    let Some(p) = app.snap.as_ref().and_then(|s| s.processes.iter().find(|p| p.gpu == *gpu && p.pid == *pid)) else {
+        return;
+    };
+    let area = f.area();
+    let w = area.width.saturating_sub(8).min(110);
+    let r = centered(area, w, 22.min(area.height));
+    f.render_widget(Clear, r);
+    let b = block(t, true).title_top(Line::from(vec![
+        s(format!(" {} ", p.name), t.title).bold(),
+        s(format!("pid {} · gpu {} ", p.local_pid.unwrap_or(p.pid), p.gpu), t.dim),
+    ]));
+    let inner = b.inner(r).inner(Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(b, r);
+
+    let mapping = match p.mapping {
+        PidMapping::Direct => "same PID namespace".to_string(),
+        PidMapping::Translated => format!("driver PID {} → local PID {} (container)", p.pid, p.local_pid.unwrap_or(0)),
+        PidMapping::Guessed => format!("driver PID {} → local PID {} (heuristic match)", p.pid, p.local_pid.unwrap_or(0)),
+        PidMapping::External => format!("driver PID {} is outside this PID namespace", p.pid),
+    };
+    let kv = |k: &str, v: String| Line::from(vec![s(format!("{k:<10}"), t.dim), s(v, t.fg)]);
+    let mut lines = vec![
+        kv("user", p.user.clone().unwrap_or_else(|| "-".into())),
+        kv("type", match p.kind {
+            ProcKind::Compute => "compute",
+            ProcKind::Graphics => "graphics",
+            ProcKind::Both => "compute + graphics",
+        }
+        .into()),
+        kv("pid", mapping),
+        kv("gpu mem", p.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into())),
+        kv("gpu util", format!("sm {} · mem {} · enc {} · dec {}", pct(p.sm_util), pct(p.mem_util), pct(p.enc_util), pct(p.dec_util))),
+        kv("host", format!(
+            "cpu {} · ram {} · running {}",
+            p.cpu.map(|c| format!("{c:.1}%")).unwrap_or("-".into()),
+            p.rss.map(fmt::bytes).unwrap_or("-".into()),
+            p.runtime.map(fmt::duration).unwrap_or("-".into())
+        )),
+        Line::default(),
+    ];
+    lines.push(Line::from(s("command", t.dim)));
+    let cmd_lines = (p.cmdline.chars().count() as u16).div_ceil(inner.width.max(1)).clamp(1, 4);
+    let text_h = lines.len() as u16;
+    f.render_widget(Paragraph::new(lines), Rect { height: text_h, ..inner });
+    let cmd_area = Rect { y: inner.y + text_h, height: cmd_lines, ..inner };
+    f.render_widget(Paragraph::new(s(p.cmdline.clone(), t.accent)).wrap(Wrap { trim: false }), cmd_area);
+
+    // History sparklines.
+    let top = cmd_area.y + cmd_area.height + 1;
+    if top + 3 > inner.y + inner.height {
+        return;
+    }
+    let chart = Rect { y: top, height: inner.y + inner.height - top, ..inner };
+    let [c1, c2] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(2).areas(chart);
+    let Some(h) = app.proc_hist.get(&(*gpu, *pid)) else { return };
+    let n = c1.width as usize * 2;
+    let mem = h.mem.tail(n);
+    let peak = mem.iter().flatten().cloned().fold(0.0f64, f64::max);
+    let total = app.snap.as_ref().and_then(|s| s.gpus.get(*gpu)).and_then(|g| g.mem_total).map(|v| v as f64);
+    let scale = total.unwrap_or(peak).max(1.0);
+    let memn: Vec<Option<f64>> = mem.iter().map(|v| v.map(|x| x / scale)).collect();
+    let label = |f: &mut Frame, a: Rect, txt: String| f.render_widget(Paragraph::new(s(txt, t.dim)), Rect { height: 1, ..a });
+    label(f, c1, format!("gpu memory  peak {}", if peak > 0.0 { fmt::bytes(peak as u64) } else { "N/A".into() }));
+    label(f, c2, "gpu utilization".into());
+    let body = |a: Rect| Rect { y: a.y + 1, height: a.height.saturating_sub(1), ..a };
+    f.render_widget(AreaChart { data: &memn, grad: t.mem, inverted: false }, body(c1));
+    f.render_widget(AreaChart { data: h.sm.tail(c2.width as usize * 2), grad: t.util, inverted: false }, body(c2));
 }
 
 fn draw_kill(f: &mut Frame, app: &App) {

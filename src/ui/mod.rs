@@ -56,6 +56,14 @@ pub struct GpuHist {
 }
 
 #[derive(Default)]
+pub struct ProcHist {
+    pub mem: Ring,
+    pub sm: Ring,
+    pub cpu: Ring,
+    seen: bool,
+}
+
+#[derive(Default)]
 pub struct HostHist {
     pub cpu: Ring,
     pub mem: Ring,
@@ -116,6 +124,7 @@ impl SortKey {
 
 pub enum Popup {
     Help,
+    Process { gpu: usize, pid: u32 },
     Kill { targets: Vec<(usize, u32, u32, String)>, signal: usize },
 }
 
@@ -136,6 +145,7 @@ pub struct App {
     pub snap: Option<Snapshot>,
     pub hist: Vec<GpuHist>,
     pub host_hist: HostHist,
+    pub proc_hist: std::collections::HashMap<(usize, u32), ProcHist>,
     pub tab: Tab,
     pub sel_gpu: usize,
     pub table: TableState,
@@ -179,6 +189,7 @@ impl App {
             info,
             snap: None,
             host_hist: HostHist::default(),
+            proc_hist: Default::default(),
             tab: Tab::Overview,
             sel_gpu: 0,
             table: TableState::default().with_selected(Some(0)),
@@ -243,6 +254,14 @@ impl App {
         self.host_hist.mem.push(if s.host.mem_total > 0 { Some(s.host.mem_used as f64 / s.host.mem_total as f64) } else { None });
         // Drop tags for processes that went away.
         self.tagged.retain(|k| s.processes.iter().any(|p| (p.gpu, p.pid) == *k));
+        for p in &s.processes {
+            let h = self.proc_hist.entry((p.gpu, p.pid)).or_default();
+            h.mem.push(p.gpu_mem.map(|v| v as f64));
+            h.sm.push(p.sm_util.map(|v| v as f64 / 100.0));
+            h.cpu.push(p.cpu.map(|v| v as f64));
+            h.seen = true;
+        }
+        self.proc_hist.retain(|_, h| std::mem::take(&mut h.seen));
         self.snap = Some(s);
         self.restore_selection();
     }
@@ -358,7 +377,13 @@ impl App {
         // Popups grab input.
         if let Some(p) = &mut self.popup {
             match p {
-                Popup::Help => self.popup = None,
+                Popup::Help | Popup::Process { .. } => match k.code {
+                    KeyCode::Char('K') | KeyCode::Delete | KeyCode::F(9) | KeyCode::Char('x') if matches!(p, Popup::Process { .. }) => {
+                        self.popup = None;
+                        self.open_kill();
+                    }
+                    _ => self.popup = None,
+                },
                 Popup::Kill { targets, signal } => match k.code {
                     KeyCode::Left | KeyCode::Char('h') => *signal = signal.saturating_sub(1),
                     KeyCode::Right | KeyCode::Char('l') => *signal = (*signal + 1).min(SIGNALS.len() - 1),
@@ -473,6 +498,11 @@ impl App {
             }
             KeyCode::Char('K') | KeyCode::Delete | KeyCode::F(9) => self.open_kill(),
             KeyCode::Char('x') => self.open_kill(),
+            KeyCode::Enter => {
+                if let Some((gpu, pid)) = self.sel_key {
+                    self.popup = Some(Popup::Process { gpu, pid });
+                }
+            }
             KeyCode::Char('t') => {
                 self.theme = (self.theme + 1) % theme::THEMES.len();
                 self.toast(format!("theme: {}", self.theme().name), false);
