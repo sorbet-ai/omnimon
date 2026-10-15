@@ -914,6 +914,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "core-foundation-sys",
  "crossterm",
  "libloading",
  "ratatui",

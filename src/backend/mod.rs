@@ -4,6 +4,8 @@
 //! Adding a vendor (AMD sysfs/fdinfo, Apple IOReport, Intel, Windows PDH...)
 //! means adding a module here and a line in `detect`.
 
+#[cfg(target_os = "macos")]
+pub mod apple;
 pub mod demo;
 pub mod nvml;
 
@@ -32,6 +34,16 @@ pub fn detect(demo: Option<usize>) -> Detected {
         return Detected { backends, warnings };
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        match apple::Apple::new() {
+            Ok(b) => backends.push(Box::new(b)),
+            Err(e) => warnings.push(format!("Apple GPU: {e}")),
+        }
+        return Detected { backends, warnings };
+    }
+
+    #[allow(unreachable_code)]
     match nvml::Nvml::new() {
         Ok(b) => backends.push(Box::new(b)),
         Err(e) => warnings.push(e),
