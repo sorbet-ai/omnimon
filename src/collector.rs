@@ -90,6 +90,7 @@ impl Collector {
             if let Some(g) = gpus.get_mut(r.gpu) {
                 g.processes.push(crate::model::GpuProcess {
                     pid: r.pid,
+                    pid_is_local: r.mapping != crate::model::PidMapping::External,
                     kind: r.kind,
                     gpu_mem: r.gpu_mem,
                     sm_util: r.sm_util,
@@ -143,6 +144,7 @@ fn merge_pdh(
             gpu,
             GpuProcess {
                 pid,
+                pid_is_local: true,
                 kind: ProcKind::Graphics,
                 gpu_mem: sane(gpu, u.dedicated),
                 sm_util: u.util,

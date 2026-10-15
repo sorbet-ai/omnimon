@@ -101,10 +101,14 @@ impl Host {
 
     /// Join (gpu index, process) pairs with OS info.
     pub fn processes(&mut self, procs: Vec<(usize, GpuProcess)>) -> Vec<ProcRow> {
-        let driver_pids: Vec<u32> = procs.iter().filter(|(_, p)| p.name.is_none()).map(|(_, p)| p.pid).collect();
+        let driver_pids: Vec<u32> = procs.iter().filter(|(_, p)| p.name.is_none() && !p.pid_is_local).map(|(_, p)| p.pid).collect();
         let map = self.mapper.resolve(&driver_pids);
 
-        let local: Vec<Pid> = map.values().filter_map(|(l, _)| l.map(Pid::from_u32)).collect();
+        let local: Vec<Pid> = map
+            .values()
+            .filter_map(|(l, _)| l.map(Pid::from_u32))
+            .chain(procs.iter().filter(|(_, p)| p.pid_is_local && p.name.is_none()).map(|(_, p)| Pid::from_u32(p.pid)))
+            .collect();
         if !local.is_empty() {
             let kind = ProcessRefreshKind::nothing()
                 .with_cpu()
@@ -121,6 +125,8 @@ impl Host {
                 // Backends that already know the process (demo, OS counters) skip mapping.
                 let (local_pid, mapping) = if p.name.is_some() {
                     (None, PidMapping::Direct)
+                } else if p.pid_is_local {
+                    (Some(p.pid), PidMapping::Direct)
                 } else {
                     map.get(&p.pid).copied().unwrap_or((None, PidMapping::External))
                 };

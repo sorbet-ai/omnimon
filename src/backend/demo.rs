@@ -113,6 +113,7 @@ impl Backend for Demo {
                     let share = if k == 0 { 0.7 } else { 0.3 / (n - 1) as f64 };
                     procs.push(GpuProcess {
                         pid: 41000 + (i * 97 + k * 13) as u32,
+                        pid_is_local: false,
                         kind: if k == 2 { ProcKind::Graphics } else { ProcKind::Compute },
                         gpu_mem: Some((total as f64 * mem_frac * share) as u64),
                         sm_util: Some((l * 100.0 * share).round() as f32),

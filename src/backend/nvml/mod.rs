@@ -525,6 +525,7 @@ fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
                 })
                 .or_insert(GpuProcess {
                     pid: p.pid,
+                    pid_is_local: false,
                     kind,
                     gpu_mem: p.mem,
                     sm_util: None,

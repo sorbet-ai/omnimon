@@ -481,6 +481,7 @@ impl Apple {
             }
             out.push(GpuProcess {
                 pid,
+                pid_is_local: true,
                 kind: ProcKind::Graphics,
                 gpu_mem: None,
                 sm_util: util,

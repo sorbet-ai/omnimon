@@ -4,9 +4,13 @@
 //! Adding a vendor (AMD sysfs/fdinfo, Apple IOReport, Intel, Windows PDH...)
 //! means adding a module here and a line in `detect`.
 
+#[cfg(target_os = "linux")]
+pub mod amd;
 #[cfg(target_os = "macos")]
 pub mod apple;
 pub mod demo;
+#[cfg(target_os = "linux")]
+pub mod drm_fdinfo;
 pub mod nvml;
 
 use crate::model::{BackendInfo, GpuInfo, GpuSample};
@@ -47,6 +51,15 @@ pub fn detect(demo: Option<usize>) -> Detected {
     match nvml::Nvml::new() {
         Ok(b) => backends.push(Box::new(b)),
         Err(e) => warnings.push(e),
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Ok(b) = amd::Amd::new() {
+        // NVIDIA missing is only worth a warning if nothing else was found.
+        if backends.is_empty() {
+            warnings.clear();
+        }
+        backends.push(Box::new(b));
     }
 
     Detected { backends, warnings }

@@ -145,6 +145,9 @@ impl ProcKind {
 #[derive(Clone, Debug, Serialize)]
 pub struct GpuProcess {
     pub pid: u32,
+    /// True when `pid` is already in our PID namespace (fdinfo, OS counters,
+    /// macOS). False for NVML on Linux, whose PIDs are host PIDs.
+    pub pid_is_local: bool,
     pub kind: ProcKind,
     pub gpu_mem: Option<u64>,
     pub sm_util: Option<f32>,
