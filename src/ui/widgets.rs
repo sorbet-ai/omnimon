@@ -131,3 +131,55 @@ impl Widget for Spark<'_> {
         }
     }
 }
+
+/// Solid area chart from eighth-block characters: one sample per column,
+/// 1/8-cell vertical precision, rows colored along a vertical gradient.
+/// `inverted` hangs from the top (drawn with reversed lower blocks, which
+/// works on any background).
+pub struct BlockChart<'a> {
+    pub data: &'a [Option<f64>],
+    pub grad: Gradient,
+    pub inverted: bool,
+}
+
+impl Widget for BlockChart<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        const LOWER: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let (w, h) = (area.width as usize, area.height as usize);
+        let n = self.data.len();
+        for cx in 0..w {
+            let from_right = w - 1 - cx;
+            if from_right >= n {
+                continue;
+            }
+            let Some(v) = self.data[n - 1 - from_right] else { continue };
+            let v = v.clamp(0.0, 1.0);
+            let mut eighths = (v * (h * 8) as f64).round() as usize;
+            if eighths == 0 && v > 0.004 {
+                eighths = 1;
+            }
+            for row in 0..h {
+                let fill = eighths.saturating_sub(row * 8).min(8);
+                if fill == 0 {
+                    break;
+                }
+                let col = self.grad.at((row as f64 + 0.5) / h as f64);
+                let x = area.x + cx as u16;
+                if self.inverted {
+                    // Color the top `fill` eighths: a lower block of the
+                    // remainder, reversed (glyph = background, cell = color).
+                    let y = area.y + row as u16;
+                    let cell = &mut buf[(x, y)];
+                    if fill == 8 {
+                        cell.set_char('█').set_fg(col);
+                    } else {
+                        cell.set_char(LOWER[8 - fill]).set_style(Style::new().fg(col).add_modifier(ratatui::style::Modifier::REVERSED));
+                    }
+                } else {
+                    let y = area.y + (h - 1 - row) as u16;
+                    buf[(x, y)].set_char(LOWER[fill]).set_fg(col);
+                }
+            }
+        }
+    }
+}

@@ -60,6 +60,10 @@ pub struct Cli {
     /// Run headless and serve Prometheus metrics (/metrics) and JSON (/json).
     #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:9465", value_name = "ADDR")]
     serve: Option<String>,
+
+    /// Pixel graphics for charts: auto-detect, force a protocol, or off.
+    #[arg(long, value_name = "auto|kitty|sixel|iterm2|off", default_value = "auto")]
+    graphics: String,
 }
 
 fn main() -> anyhow::Result<()> {

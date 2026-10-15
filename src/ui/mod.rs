@@ -1,6 +1,9 @@
 //! Interactive TUI.
 
 mod draw;
+mod gfx;
+
+pub use gfx::ChartStyle;
 mod theme;
 mod widgets;
 
@@ -165,12 +168,21 @@ pub struct App {
     pub paused: bool,
     pub interval: Duration,
     pub hit: Hit,
+    pub gfx: gfx::Gfx,
+    pub chart_style: ChartStyle,
+    /// Bumped on every new snapshot; keys the chart image cache.
+    pub version: u64,
     pub me: Option<String>,
     quit: bool,
 }
 
 impl App {
-    fn new(info: SystemInfo, interval: Duration, cli: &Cli, cfg: &Config) -> Self {
+    fn new(info: SystemInfo, interval: Duration, cli: &Cli, cfg: &Config, gfx: gfx::Gfx) -> Self {
+        let chart_style = match cfg.chart_style {
+            Some(ChartStyle::Pixels) | None if gfx.pixels_available() => ChartStyle::Pixels,
+            Some(ChartStyle::Pixels) | None => ChartStyle::Blocks,
+            Some(s) => s,
+        };
         let n = info.gpus.len();
         let theme = cli
             .theme
@@ -209,6 +221,9 @@ impl App {
             paused: false,
             interval,
             hit: Hit::default(),
+            gfx,
+            chart_style,
+            version: 0,
             me: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok(),
             quit: false,
         }
@@ -222,6 +237,25 @@ impl App {
             .or(self.info.gpus.get(i)?.power_limit_max)
             .unwrap_or(self.hist.get(i)?.peak_power.max(5.0));
         Some((p / scale).min(1.0))
+    }
+
+    pub fn chart_ctx(&self) -> gfx::ChartCtx<'_> {
+        let bg = match self.gfx.bg {
+            Some((r, g, b)) => ratatui::style::Color::Rgb(r, g, b),
+            None => ratatui::style::Color::Rgb(0x1a, 0x1b, 0x26),
+        };
+        gfx::ChartCtx { gfx: &self.gfx, style: self.chart_style, version: self.version, theme: self.theme, bg }
+    }
+
+    fn cycle_chart_style(&mut self) {
+        let order: Vec<ChartStyle> = [ChartStyle::Pixels, ChartStyle::Blocks, ChartStyle::Braille]
+            .into_iter()
+            .filter(|s| *s != ChartStyle::Pixels || self.gfx.pixels_available())
+            .collect();
+        let i = order.iter().position(|s| *s == self.chart_style).unwrap_or(0);
+        self.chart_style = order[(i + 1) % order.len()];
+        let extra = if self.chart_style == ChartStyle::Pixels { format!(" ({})", self.gfx.protocol_name()) } else { String::new() };
+        self.toast(format!("charts: {}{extra}", self.chart_style.label()), false);
     }
 
     pub fn theme(&self) -> &'static theme::Theme {
@@ -263,6 +297,7 @@ impl App {
         }
         self.proc_hist.retain(|_, h| std::mem::take(&mut h.seen));
         self.snap = Some(s);
+        self.version += 1;
         self.restore_selection();
     }
 
@@ -503,6 +538,7 @@ impl App {
                     self.popup = Some(Popup::Process { gpu, pid });
                 }
             }
+            KeyCode::Char('G') => self.cycle_chart_style(),
             KeyCode::Char('t') => {
                 self.theme = (self.theme + 1) % theme::THEMES.len();
                 self.toast(format!("theme: {}", self.theme().name), false);
@@ -574,9 +610,11 @@ impl App {
 
 pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli, cfg: Config) -> anyhow::Result<()> {
     let sampler = Sampler::spawn(collector, interval);
-    let mut app = App::new(info, interval, cli, &cfg);
-
     let mut terminal = ratatui::init();
+    // Probe for pixel graphics after entering the alternate screen and before
+    // reading any input (the terminal answers on stdin).
+    let gfx = if cli.graphics == "off" { gfx::Gfx::none() } else { gfx::Gfx::detect(Some(cli.graphics.as_str()).filter(|g| *g != "auto")) };
+    let mut app = App::new(info, interval, cli, &cfg, gfx);
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = (|| -> anyhow::Result<()> {
         let mut dirty = true;
@@ -606,6 +644,9 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli
                 last_draw = Instant::now();
             }
             if event::poll(Duration::from_millis(80))? {
+                // Sixel/iTerm2 images aren't tied to cells: anything that changes
+                // what covers them needs a full repaint.
+                let before = (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu);
                 loop {
                     match event::read()? {
                         Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k, &sampler),
@@ -615,6 +656,10 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli
                     if !event::poll(Duration::ZERO)? {
                         break;
                     }
+                }
+                if app.chart_ctx().pixels() && before != (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu) {
+                    app.gfx.invalidate();
+                    terminal.clear()?;
                 }
                 dirty = true;
             }
@@ -631,6 +676,7 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, cli: &Cli
         sort: Some(app.sort.label().to_string()),
         sort_desc: Some(app.sort_desc),
         full_cmd: Some(app.full_cmd),
+        chart_style: Some(app.chart_style),
     });
     res
 }

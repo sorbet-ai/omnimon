@@ -15,6 +15,7 @@ pub struct Config {
     pub sort: Option<String>,
     pub sort_desc: Option<bool>,
     pub full_cmd: Option<bool>,
+    pub chart_style: Option<crate::ui::ChartStyle>,
 }
 
 pub fn path() -> Option<PathBuf> {

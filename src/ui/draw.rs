@@ -7,7 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use super::theme::{Gradient, Theme};
-use super::widgets::{AreaChart, GradBar, Spark};
+use super::gfx::Series;
+use super::widgets::{GradBar, Spark};
 use super::{App, Popup, SIGNALS, SortKey, Tab};
 use crate::brand::{APP_NAME, APP_VERSION};
 use crate::fmt;
@@ -414,13 +415,22 @@ fn draw_gpu_card(f: &mut Frame, app: &mut App, i: usize, area: Rect) {
         for y in chart.y..chart.y + chart.height {
             f.buffer_mut()[(right.x, y)].set_char('│').set_fg(t.border);
         }
-        let n = chart.width as usize * 2;
+        let ctx = app.chart_ctx();
+        let n = ctx.samples(chart.width);
         let h = &app.hist[i];
+        ctx.draw(
+            f,
+            chart,
+            1 + i as u32,
+            &[Series { data: h.util.tail(n), grad: t.util, down: false }, Series { data: h.mem.tail(n), grad: t.mem, down: true }],
+        );
+        // Text labels would punch holes in a pixel image; values are in the bars anyway.
+        if ctx.pixels() {
+            return;
+        }
         let up_h = chart.height.div_ceil(2);
         let up = Rect { height: up_h, ..chart };
         let down = Rect { y: chart.y + up_h, height: chart.height - up_h, ..chart };
-        f.render_widget(AreaChart { data: h.util.tail(n), grad: t.util, inverted: false }, up);
-        f.render_widget(AreaChart { data: h.mem.tail(n), grad: t.mem, inverted: true }, down);
         let lab = |f: &mut Frame, text: String, y: u16, c: Color| {
             let w = text.chars().count() as u16;
             if chart.width > w + 2 {
@@ -867,7 +877,8 @@ fn draw_charts(f: &mut Frame, app: &mut App, area: Rect) {
             .title_top(Line::from(vec![s(format!(" {} ", c.title), t.title).bold()]))
             .title_top(Line::from(s(format!(" {} ", c.value), t.fg).bold()).right_aligned());
         let inner = b.inner(cell);
-        let w = inner.width as usize * 2;
+        let ctx = app.chart_ctx();
+        let w = ctx.samples(inner.width);
         let raw = c.data.tail(w);
         let stats = {
             let vals: Vec<f64> = raw.iter().flatten().copied().collect();
@@ -879,32 +890,27 @@ fn draw_charts(f: &mut Frame, app: &mut App, area: Rect) {
         };
         let secs = (w as f64 * app.interval.as_secs_f64()) as u64;
         let b = b.title_bottom(Line::from(s(format!(" {} ", fmt::duration(secs)), t.faint)));
-        let b = match (stats, c.scale) {
-            (Some((avg, max)), Scale::Unit) => {
-                b.title_bottom(Line::from(s(format!(" avg {:.0}%  max {:.0}% ", avg * 100.0, max * 100.0), t.dim)).right_aligned())
-            }
-            _ => b,
-        };
-        f.render_widget(b, cell);
-        match (c.mirror, c.scale) {
-            (Some(m), _) => {
+        let slot = 100 + (i as u32) * 10 + k as u32;
+        match c.mirror {
+            Some(m) => {
                 let mraw = m.tail(w);
                 let max = raw.iter().chain(mraw).flatten().cloned().fold(1.0f64, f64::max);
                 let norm = |v: &[Option<f64>]| v.iter().map(|x| x.map(|x| x / max)).collect::<Vec<_>>();
                 let (a, bb) = (norm(raw), norm(mraw));
-                let up_h = inner.height.div_ceil(2);
-                f.render_widget(AreaChart { data: &a, grad: c.grad, inverted: false }, Rect { height: up_h, ..inner });
-                f.render_widget(
-                    AreaChart { data: &bb, grad: c.grad2, inverted: true },
-                    Rect { y: inner.y + up_h, height: inner.height - up_h, ..inner },
-                );
-                let lbl = format!("peak {}", fmt::rate(max as u64));
-                let lw = lbl.chars().count() as u16;
-                if inner.width > lw {
-                    f.render_widget(Paragraph::new(s(lbl, t.faint)), Rect { x: inner.x + inner.width - lw, width: lw, height: 1, ..inner });
-                }
+                let b = b.title_bottom(Line::from(s(format!(" peak {} ", fmt::rate(max as u64)), t.dim)).right_aligned());
+                f.render_widget(b, cell);
+                ctx.draw(f, inner, slot, &[Series { data: &a, grad: c.grad, down: false }, Series { data: &bb, grad: c.grad2, down: true }]);
             }
-            (None, _) => f.render_widget(AreaChart { data: raw, grad: c.grad, inverted: false }, inner),
+            None => {
+                let b = match (stats, c.scale) {
+                    (Some((avg, max)), Scale::Unit) => {
+                        b.title_bottom(Line::from(s(format!(" avg {:.0}%  max {:.0}% ", avg * 100.0, max * 100.0), t.dim)).right_aligned())
+                    }
+                    _ => b,
+                };
+                f.render_widget(b, cell);
+                ctx.draw(f, inner, slot, &[Series { data: raw, grad: c.grad, down: false }]);
+            }
         }
     }
 }
@@ -1054,6 +1060,7 @@ fn draw_help(f: &mut Frame, app: &App) {
         ("space", "tag process (for multi-kill)"),
         ("K  Del  F9", "signal tagged / selected process"),
         ("t", "cycle theme"),
+        ("G", "chart style: pixels · blocks · braille"),
         ("+ / -", "slower / faster refresh"),
         ("p", "pause sampling"),
         ("q  Esc  Ctrl-C", "quit"),
@@ -1128,7 +1135,8 @@ fn draw_process(f: &mut Frame, app: &App) {
     let chart = Rect { y: top, height: inner.y + inner.height - top, ..inner };
     let [c1, c2] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(2).areas(chart);
     let Some(h) = app.proc_hist.get(&(*gpu, *pid)) else { return };
-    let n = c1.width as usize * 2;
+    let ctx = app.chart_ctx();
+    let n = ctx.samples(c1.width);
     let mem = h.mem.tail(n);
     let peak = mem.iter().flatten().cloned().fold(0.0f64, f64::max);
     let total = app.snap.as_ref().and_then(|s| s.gpus.get(*gpu)).and_then(|g| g.mem_total).map(|v| v as f64);
@@ -1138,8 +1146,8 @@ fn draw_process(f: &mut Frame, app: &App) {
     label(f, c1, format!("gpu memory  peak {}", if peak > 0.0 { fmt::bytes(peak as u64) } else { "N/A".into() }));
     label(f, c2, "gpu utilization".into());
     let body = |a: Rect| Rect { y: a.y + 1, height: a.height.saturating_sub(1), ..a };
-    f.render_widget(AreaChart { data: &memn, grad: t.mem, inverted: false }, body(c1));
-    f.render_widget(AreaChart { data: h.sm.tail(c2.width as usize * 2), grad: t.util, inverted: false }, body(c2));
+    ctx.draw(f, body(c1), 900, &[Series { data: &memn, grad: t.mem, down: false }]);
+    ctx.draw(f, body(c2), 901, &[Series { data: h.sm.tail(ctx.samples(c2.width)), grad: t.util, down: false }]);
 }
 
 fn draw_kill(f: &mut Frame, app: &App) {
