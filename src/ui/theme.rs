@@ -22,7 +22,13 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
             let m = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
             Color::Rgb(m(r1, r2), m(g1, g2), m(b1, b2))
         }
-        _ => if t < 0.5 { a } else { b },
+        _ => {
+            if t < 0.5 {
+                a
+            } else {
+                b
+            }
+        }
     }
 }
 
@@ -192,9 +198,10 @@ pub fn truecolor_supported() -> bool {
         return v != "256";
     }
     if let Ok(c) = std::env::var("COLORTERM")
-        && (c.contains("truecolor") || c.contains("24bit")) {
-            return true;
-        }
+        && (c.contains("truecolor") || c.contains("24bit"))
+    {
+        return true;
+    }
     if cfg!(windows) {
         // Windows Terminal and modern conhost both handle 24-bit SGR.
         return true;
@@ -203,11 +210,17 @@ pub fn truecolor_supported() -> bool {
         return true;
     }
     if let Ok(t) = std::env::var("TERM_PROGRAM")
-        && ["iTerm.app", "WezTerm", "vscode", "ghostty", "Hyper", "Tabby", "rio"].contains(&t.as_str()) {
-            return true;
-        }
+        && ["iTerm.app", "WezTerm", "vscode", "ghostty", "Hyper", "Tabby", "rio"].contains(&t.as_str())
+    {
+        return true;
+    }
     let term = std::env::var("TERM").unwrap_or_default();
-    term.contains("truecolor") || term.contains("24bit") || term.contains("kitty") || term.contains("ghostty") || term.contains("alacritty") || term.contains("foot")
+    term.contains("truecolor")
+        || term.contains("24bit")
+        || term.contains("kitty")
+        || term.contains("ghostty")
+        || term.contains("alacritty")
+        || term.contains("foot")
 }
 
 fn to_256(c: Color) -> Color {
@@ -231,11 +244,7 @@ fn to_256(c: Color) -> Color {
     let avg = (r as u32 + g as u32 + b as u32) / 3;
     let gray_i = if avg > 238 { 23 } else { (avg.saturating_sub(3) / 10) as u8 };
     let gv = 8 + 10 * gray_i;
-    if d((gv, gv, gv)) < d(cube) {
-        Color::Indexed(232 + gray_i)
-    } else {
-        Color::Indexed(16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8)
-    }
+    if d((gv, gv, gv)) < d(cube) { Color::Indexed(232 + gray_i) } else { Color::Indexed(16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8) }
 }
 
 /// Downgrade a rendered frame for terminals without truecolor.

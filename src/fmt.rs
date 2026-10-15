@@ -58,3 +58,48 @@ pub fn opt<T: std::fmt::Display>(v: Option<T>, unit: &str) -> String {
         None => "N/A".into(),
     }
 }
+
+/// Percent with no decimals, or "N/A".
+pub fn pct(v: Option<f32>) -> String {
+    v.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "N/A".into())
+}
+
+/// Truncate to `n` characters, ending with "…" when cut.
+pub fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else if n == 0 {
+        String::new()
+    } else {
+        s.chars().take(n - 1).collect::<String>() + "…"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(bytes(1023), "1023B");
+        assert_eq!(bytes(1024), "1.00KiB");
+        assert_eq!(bytes(24 << 30), "24.0GiB");
+        assert_eq!(bytes_short(1536 << 20), "1.5G");
+        assert_eq!(bytes_short(812 << 20), "812M");
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(duration(59), "0:59");
+        assert_eq!(duration(3600), "1:00:00");
+        assert_eq!(duration(90000), "1d01h");
+    }
+
+    #[test]
+    fn truncation() {
+        assert_eq!(truncate("abcdef", 4), "abc…");
+        assert_eq!(truncate("abc", 4), "abc");
+        assert_eq!(truncate("abc", 0), "");
+        assert_eq!(truncate("İstanbul", 3), "İs…");
+    }
+}

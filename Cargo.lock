@@ -1084,6 +1084,7 @@ dependencies = [
  "crossterm",
  "image",
  "libloading",
+ "log",
  "ratatui",
  "ratatui-image",
  "serde",

@@ -3,13 +3,15 @@
 use std::time::Instant;
 
 use super::Backend;
-use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, ProcKind, Vendor};
+use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
 
 const GIB: u64 = 1 << 30;
 
 struct Model {
     name: &'static str,
     mem_gib: u64,
+    /// GB/s
+    bandwidth: f64,
     tdp: f64,
     clk: u32,
     mem_clk: u32,
@@ -17,10 +19,18 @@ struct Model {
 }
 
 const MODELS: &[Model] = &[
-    Model { name: "NVIDIA H100 80GB HBM3", mem_gib: 80, tdp: 700.0, clk: 1980, mem_clk: 2619, arch: "Hopper" },
-    Model { name: "NVIDIA GeForce RTX 4090", mem_gib: 24, tdp: 450.0, clk: 3105, mem_clk: 10501, arch: "Ada Lovelace" },
-    Model { name: "NVIDIA A100-SXM4-40GB", mem_gib: 40, tdp: 400.0, clk: 1410, mem_clk: 1215, arch: "Ampere" },
-    Model { name: "NVIDIA RTX 6000 Ada Generation", mem_gib: 48, tdp: 300.0, clk: 2505, mem_clk: 10001, arch: "Ada Lovelace" },
+    Model { name: "NVIDIA H100 80GB HBM3", mem_gib: 80, bandwidth: 3350.0, tdp: 700.0, clk: 1980, mem_clk: 2619, arch: "Hopper" },
+    Model { name: "NVIDIA GeForce RTX 4090", mem_gib: 24, bandwidth: 1008.0, tdp: 450.0, clk: 3105, mem_clk: 10501, arch: "Ada Lovelace" },
+    Model { name: "NVIDIA A100-SXM4-40GB", mem_gib: 40, bandwidth: 1555.0, tdp: 400.0, clk: 1410, mem_clk: 1215, arch: "Ampere" },
+    Model {
+        name: "NVIDIA RTX 6000 Ada Generation",
+        mem_gib: 48,
+        bandwidth: 960.0,
+        tdp: 300.0,
+        clk: 2505,
+        mem_clk: 10001,
+        arch: "Ada Lovelace",
+    },
 ];
 
 const JOBS: &[&str] = &["python train.py", "vllm serve", "ollama", "torchrun", "blender", "jupyter-kernel", "llama-server", "ffmpeg"];
@@ -38,7 +48,8 @@ impl Demo {
         let gpus = (0..n)
             .map(|i| {
                 let m = &MODELS[if n >= 4 { 0 } else { i % MODELS.len() }];
-                let mut g = GpuInfo::new(i, Vendor::Demo, m.name.to_string());
+                let mut g = GpuInfo::new(Vendor::Demo, m.name.to_string());
+                g.memory_bandwidth = Some(m.bandwidth * 1e9);
                 g.uuid = Some(format!("GPU-demo-{i:04}-0000-0000-000000000000"));
                 g.pci_bus_id = Some(format!("00000000:{:02X}:00.0", 0x18 + i * 0x10));
                 g.memory_total = Some(m.mem_gib * GIB);
@@ -76,6 +87,7 @@ impl Backend for Demo {
             driver_version: Some("999.99".into()),
             api_version: None,
             runtime_version: Some("13.0".into()),
+            runtime_name: Some("CUDA".into()),
         }
     }
 
@@ -102,7 +114,15 @@ impl Backend for Demo {
             let l = self.load[i];
 
             let total = g.memory_total.unwrap();
-            let mem_frac = if i == 1 && self.gpus.len() > 2 { 0.01 } else { 0.55 + 0.25 * (t / 60.0 + phase).sin().abs() };
+            // GPU 0 periodically outgrows its VRAM and spills (for the spill UI).
+            let spilling = i == 0 && (t % 90.0) > 45.0;
+            let mem_frac = if i == 1 && self.gpus.len() > 2 {
+                0.01
+            } else if spilling {
+                0.985
+            } else {
+                0.55 + 0.25 * (t / 60.0 + phase).sin().abs()
+            };
             let tdp = g.power_limit_default.unwrap();
             let temp = (34.0 + 48.0 * l + 2.0 * self.rand()) as u32;
 
@@ -113,24 +133,25 @@ impl Backend for Demo {
                     let share = if k == 0 { 0.7 } else { 0.3 / (n - 1) as f64 };
                     procs.push(GpuProcess {
                         pid: 41000 + (i * 97 + k * 13) as u32,
-                        pid_is_local: false,
+                        scope: PidScope::Synthetic,
                         kind: if k == 2 { ProcKind::Graphics } else { ProcKind::Compute },
                         gpu_mem: Some((total as f64 * mem_frac * share) as u64),
-                        sm_util: Some((l * 100.0 * share).round() as f32),
+                        gpu_mem_shared: Some(if spilling && k == 0 { 3 * GIB + GIB / 4 } else { 24 << 20 }),
+                        sm_util: Some((l * 100.0 * share * if spilling { 0.3 } else { 1.0 }).round() as f32),
                         mem_util: Some((l * 60.0 * share).round() as f32),
                         enc_util: Some(0.0),
                         dec_util: Some(if JOBS[(i + k) % JOBS.len()] == "ffmpeg" { 35.0 } else { 0.0 }),
                         gpu_instance: None,
-                        name: Some(JOBS[(i * 3 + k) % JOBS.len()].to_string()),
+                        name_hint: Some(JOBS[(i * 3 + k) % JOBS.len()].to_string()),
                     });
                 }
             }
 
             let mut throttle = Vec::new();
             if l < 0.05 {
-                throttle.push("idle".into());
+                throttle.push(Throttle::Idle);
             } else if l > 0.85 {
-                throttle.push("power cap".into());
+                throttle.push(Throttle::PowerCap);
             }
             out.push(GpuSample {
                 util_gpu: Some((l * 100.0).round() as f32),
@@ -138,6 +159,7 @@ impl Backend for Demo {
                 mem_used: Some((total as f64 * mem_frac) as u64),
                 mem_total: Some(total),
                 mem_reserved: Some(total / 100),
+                mem_shared: Some(if spilling { 3 * GIB + GIB / 2 } else { GIB / 4 }),
                 temp: Some(temp),
                 temp_mem: if g.num_fans == 0 { Some(temp + 6) } else { None },
                 fans: if g.num_fans > 0 { vec![(30.0 + 50.0 * l) as u32] } else { vec![] },
@@ -163,7 +185,7 @@ impl Backend for Demo {
                 bar1_used: Some(GIB / 8),
                 bar1_total: Some(total),
                 processes: procs,
-                error: None,
+                ..Default::default()
             });
         }
         out

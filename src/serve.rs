@@ -8,9 +8,10 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brand::{APP_NAME, APP_VERSION};
+use crate::brand::{APP_NAME, APP_VERSION, METRIC_NS};
 use crate::collector::{Collector, Sampler};
-use crate::model::{Snapshot, SystemInfo};
+use crate::model::{GpuSample, ProcRow, Snapshot, SpillLevel, SystemInfo};
+use crate::report::JsonOut;
 
 pub fn run(collector: Collector, info: SystemInfo, interval: Duration, addr: &str) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr)?;
@@ -26,6 +27,7 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, addr: &st
         });
     }
     let info = Arc::new(info);
+    // One short-lived thread per request: fine for a localhost scrape target.
     for stream in listener.incoming().flatten() {
         let (latest, info) = (latest.clone(), info.clone());
         std::thread::spawn(move || {
@@ -39,16 +41,13 @@ fn handle(mut stream: TcpStream, latest: &Mutex<Option<Snapshot>>, info: &System
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
-    let path = line.split_whitespace().nth(1).unwrap_or("/");
+    let target = line.split_whitespace().nth(1).unwrap_or("/");
+    let path = target.split('?').next().unwrap_or("/");
     let snap = latest.lock().unwrap().clone();
     let (status, ctype, body) = match (path, snap) {
         (_, None) => ("503 Service Unavailable", "text/plain", "warming up\n".to_string()),
         ("/metrics", Some(s)) => ("200 OK", "text/plain; version=0.0.4", prometheus(info, &s)),
-        ("/json", Some(s)) => (
-            "200 OK",
-            "application/json",
-            serde_json::to_string(&serde_json::json!({ "schema": 1, "system": info, "snapshot": s })).unwrap_or_default(),
-        ),
+        ("/json", Some(s)) => ("200 OK", "application/json", serde_json::to_string(&JsonOut::new(info, &s)).unwrap_or_default()),
         ("/", Some(_)) => ("200 OK", "text/plain", format!("{APP_NAME} {APP_VERSION}\n/metrics  Prometheus\n/json     snapshot\n")),
         _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
     };
@@ -59,11 +58,12 @@ fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 
-/// Prometheus text exposition. Metric names are namespaced by the app name.
+/// Prometheus text exposition. Metric names are prefixed with [`METRIC_NS`].
 pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
-    let ns = APP_NAME.replace('-', "_");
+    let ns = METRIC_NS.replace('-', "_");
     let mut o = String::new();
     let mut metric = |name: &str, help: &str, kind: &str, samples: Vec<(String, f64)>| {
+        let samples: Vec<_> = samples.into_iter().filter(|(_, v)| v.is_finite()).collect();
         if samples.is_empty() {
             return;
         }
@@ -72,12 +72,12 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
             let _ = writeln!(o, "{ns}_{name}{{{labels}}} {v}");
         }
     };
-    let gl = |i: usize| {
-        let g = &info.gpus[i];
-        format!("gpu=\"{i}\",uuid=\"{}\"", esc(g.uuid.as_deref().unwrap_or("")))
+    let gl = |i: usize| -> Option<String> {
+        let g = info.gpus.get(i)?;
+        Some(format!("gpu=\"{i}\",uuid=\"{}\"", esc(&g.stable_id())))
     };
-    let per = |f: &dyn Fn(&crate::model::GpuSample) -> Option<f64>| -> Vec<(String, f64)> {
-        s.gpus.iter().enumerate().filter_map(|(i, g)| f(g).map(|v| (gl(i), v))).collect()
+    let per = |f: &dyn Fn(&GpuSample) -> Option<f64>| -> Vec<(String, f64)> {
+        s.gpus.iter().enumerate().filter_map(|(i, g)| Some((gl(i)?, f(g)?))).collect()
     };
 
     metric(
@@ -86,22 +86,39 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
         "gauge",
         info.gpus
             .iter()
-            .map(|g| {
-                (format!("{},name=\"{}\",vendor=\"{}\"", gl(g.index), esc(&g.name), g.vendor.label()), 1.0)
-            })
+            .filter_map(|g| Some((format!("{},name=\"{}\",vendor=\"{}\"", gl(g.index)?, esc(&g.name), g.vendor.label()), 1.0)))
             .collect(),
     );
     metric("gpu_utilization_percent", "GPU core utilization.", "gauge", per(&|g| g.util_gpu.map(f64::from)));
     metric("gpu_memory_bandwidth_utilization_percent", "Memory controller utilization.", "gauge", per(&|g| g.util_mem.map(f64::from)));
     metric("gpu_memory_used_bytes", "Device memory in use.", "gauge", per(&|g| g.mem_used.map(|v| v as f64)));
     metric("gpu_memory_total_bytes", "Device memory size.", "gauge", per(&|g| g.mem_total.map(|v| v as f64)));
+    metric("gpu_memory_shared_bytes", "GPU allocations in system memory.", "gauge", per(&|g| g.mem_shared.map(|v| v as f64)));
+    metric(
+        "gpu_spilled_bytes",
+        "GPU allocations measured as spilled into system memory.",
+        "gauge",
+        per(&|g| Some(g.spill.bytes.unwrap_or(0) as f64)),
+    );
+    metric(
+        "gpu_spill_state",
+        "0 = ok, 1 = VRAM pressure, 2 = spilling.",
+        "gauge",
+        per(&|g| {
+            Some(match g.spill.level {
+                SpillLevel::None => 0.0,
+                SpillLevel::Pressure => 1.0,
+                SpillLevel::Spilling => 2.0,
+            })
+        }),
+    );
     metric("gpu_temperature_celsius", "GPU core temperature.", "gauge", per(&|g| g.temp.map(f64::from)));
     metric("gpu_memory_temperature_celsius", "Memory temperature.", "gauge", per(&|g| g.temp_mem.map(f64::from)));
     metric("gpu_fan_percent", "Mean fan speed.", "gauge", per(&|g| g.fan().map(f64::from)));
     metric("gpu_power_watts", "Power draw.", "gauge", per(&|g| g.power));
     metric("gpu_power_limit_watts", "Enforced power limit.", "gauge", per(&|g| g.power_limit));
     metric("gpu_energy_joules_total", "Energy consumed since driver load.", "counter", per(&|g| g.energy_joules));
-    metric("gpu_sm_clock_mhz", "SM clock.", "gauge", per(&|g| g.clock_sm.map(f64::from)));
+    metric("gpu_sm_clock_mhz", "SM clock.", "gauge", per(&|g| g.clock_sm.or(g.clock_graphics).map(f64::from)));
     metric("gpu_memory_clock_mhz", "Memory clock.", "gauge", per(&|g| g.clock_mem.map(f64::from)));
     metric("gpu_pstate", "Performance state (0 = max).", "gauge", per(&|g| g.pstate.map(f64::from)));
     metric("gpu_pcie_rx_bytes_per_second", "PCIe receive throughput.", "gauge", per(&|g| g.pcie_rx.map(|v| v as f64)));
@@ -118,7 +135,7 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
             .flat_map(|(i, g)| {
                 [("corrected", g.ecc_corrected), ("uncorrected", g.ecc_uncorrected)]
                     .into_iter()
-                    .filter_map(move |(k, v)| v.map(|v| (format!("{},type=\"{k}\"", gl(i)), v as f64)))
+                    .filter_map(move |(k, v)| Some((format!("{},type=\"{k}\"", gl(i)?), v? as f64)))
             })
             .collect(),
     );
@@ -129,32 +146,97 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
         s.gpus
             .iter()
             .enumerate()
-            .flat_map(|(i, g)| g.throttle.iter().map(move |r| (format!("{},reason=\"{}\"", gl(i), esc(r)), 1.0)))
+            .flat_map(|(i, g)| g.throttle.iter().filter_map(move |r| Some((format!("{},reason=\"{}\"", gl(i)?, esc(r.label())), 1.0))))
             .collect(),
     );
-    let pl = |p: &crate::model::ProcRow| {
-        format!(
-            "{},pid=\"{}\",name=\"{}\",user=\"{}\"",
-            gl(p.gpu),
-            p.pid,
-            esc(&p.name),
-            esc(p.user.as_deref().unwrap_or(""))
-        )
+    let pl = |p: &ProcRow| -> Option<String> {
+        Some(format!("{},pid=\"{}\",name=\"{}\",user=\"{}\"", gl(p.gpu)?, p.pid(), esc(&p.name), esc(p.user.as_deref().unwrap_or(""))))
     };
+    let per_proc =
+        |f: &dyn Fn(&ProcRow) -> Option<f64>| -> Vec<(String, f64)> { s.processes.iter().filter_map(|p| Some((pl(p)?, f(p)?))).collect() };
+    metric("process_gpu_memory_bytes", "GPU memory used by a process.", "gauge", per_proc(&|p| p.usage.gpu_mem.map(|m| m as f64)));
     metric(
-        "process_gpu_memory_bytes",
-        "GPU memory used by a process.",
+        "process_gpu_shared_memory_bytes",
+        "A process's GPU allocations in system memory.",
         "gauge",
-        s.processes.iter().filter_map(|p| p.gpu_mem.map(|m| (pl(p), m as f64))).collect(),
+        per_proc(&|p| p.usage.gpu_mem_shared.map(|m| m as f64)),
     );
     metric(
         "process_gpu_utilization_percent",
         "SM utilization attributed to a process.",
         "gauge",
-        s.processes.iter().filter_map(|p| p.sm_util.map(|v| (pl(p), v as f64))).collect(),
+        per_proc(&|p| p.usage.sm_util.map(f64::from)),
     );
     metric("host_cpu_utilization_percent", "Host CPU utilization.", "gauge", vec![(String::new(), s.host.cpu as f64)]);
     metric("host_memory_used_bytes", "Host memory in use.", "gauge", vec![(String::new(), s.host.mem_used as f64)]);
     metric("host_memory_total_bytes", "Host memory size.", "gauge", vec![(String::new(), s.host.mem_total as f64)]);
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{GpuInfo, GpuProcess, PidMapping, Throttle};
+
+    fn fixture() -> (SystemInfo, Snapshot) {
+        let mut info = SystemInfo::default();
+        info.gpus.push(GpuInfo { name: "Weird \"GPU\"\nname".into(), uuid: Some("GPU-1".into()), ..Default::default() });
+        let snap = Snapshot {
+            gpus: vec![
+                GpuSample { util_gpu: Some(50.0), power: Some(f64::NAN), throttle: vec![Throttle::PowerCap], ..Default::default() },
+                // A sample without a matching GpuInfo must not panic.
+                GpuSample { util_gpu: Some(1.0), ..Default::default() },
+            ],
+            processes: vec![ProcRow {
+                gpu: 0,
+                usage: GpuProcess { pid: 7, gpu_mem: Some(1024), ..Default::default() },
+                local_pid: Some(7),
+                mapping: PidMapping::Direct,
+                name: "back\\slash".into(),
+                cmdline: String::new(),
+                user: None,
+                cpu: None,
+                rss: None,
+                runtime: None,
+                spilling: false,
+            }],
+            ..Default::default()
+        };
+        (info, snap)
+    }
+
+    #[test]
+    fn exposition_is_well_formed() {
+        let (info, snap) = fixture();
+        let out = prometheus(&info, &snap);
+        assert!(out.contains(r#"name="Weird \"GPU\"\nname""#));
+        assert!(out.contains(r#"name="back\\slash""#));
+        assert!(out.contains(r#"reason="power cap""#));
+        assert!(!out.lines().any(|l| l.ends_with("NaN") || l.ends_with("inf")));
+        assert!(!out.contains("gpu=\"1\""), "sample without GpuInfo leaked");
+        // Every sample line belongs to the most recent TYPE line.
+        let mut current = String::new();
+        for line in out.lines() {
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                current = rest.split(' ').next().unwrap().to_string();
+            } else if !line.starts_with('#') {
+                assert!(line.starts_with(&current), "{line} outside {current}");
+            }
+        }
+    }
+
+    #[test]
+    fn json_shape() {
+        let (info, snap) = fixture();
+        let v: serde_json::Value = serde_json::to_value(JsonOut::new(&info, &snap)).unwrap();
+        assert_eq!(v["schema"], crate::report::SCHEMA);
+        assert!(v["system"]["gpus"].is_array());
+        // Processes are flattened: driver fields sit beside host fields.
+        let p = &v["snapshot"]["processes"][0];
+        assert_eq!(p["pid"], 7);
+        assert_eq!(p["gpu_mem"], 1024);
+        assert_eq!(p["mapping"], "direct");
+        // Backend-internal per-GPU lists are not part of the output.
+        assert!(v["snapshot"]["gpus"][0].get("processes").is_none());
+    }
 }

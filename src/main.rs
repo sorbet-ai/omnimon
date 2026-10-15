@@ -4,13 +4,13 @@ mod collector;
 mod config;
 mod fmt;
 mod host;
+mod logging;
 mod model;
-mod pidmap;
+mod os;
 mod report;
 mod serve;
+mod spill;
 mod ui;
-#[cfg(windows)]
-mod winpdh;
 
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use collector::Collector;
 
 #[derive(Parser, Debug)]
 #[command(name = brand::APP_NAME, version, about = "Terminal GPU monitor. Single binary; works on bare metal, in containers, WSL and Windows.")]
-pub struct Cli {
+struct Cli {
     /// Refresh interval in seconds [default: 1, or the last value used].
     #[arg(short, long)]
     interval: Option<f64>,
@@ -68,6 +68,7 @@ pub struct Cli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    logging::init(if cli.diagnose { log::LevelFilter::Debug } else { log::LevelFilter::Warn });
     let cfg = config::load();
     let secs = cli.interval.or(cfg.interval).unwrap_or(1.0);
     let interval = Duration::from_secs_f64(secs.clamp(0.1, 60.0));
@@ -100,5 +101,6 @@ fn main() -> anyhow::Result<()> {
         return serve::run(collector, info, interval, addr);
     }
 
-    ui::run(collector, info, interval, &cli, cfg)
+    let opts = ui::UiOptions { theme: cli.theme.clone(), readonly: cli.readonly, graphics: cli.graphics.clone() };
+    ui::run(collector, info, interval, &opts, cfg)
 }

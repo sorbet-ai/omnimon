@@ -1,160 +1,93 @@
 //! Collects a full [`Snapshot`] from all backends + the host, and runs that
-//! on a background thread for the TUI.
+//! on a background thread for the TUI and the exporter.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::backend::{Backend, Detected};
 use crate::host::Host;
-use crate::model::{Snapshot, SystemInfo};
+use crate::model::{GpuInfo, GpuSample, ProcRow, Snapshot, SystemInfo, Vendor};
+use crate::os::ProcEnricher;
+use crate::spill;
 
 pub struct Collector {
     backends: Vec<Box<dyn Backend>>,
-    /// Global index of each backend's first GPU.
-    offsets: Vec<usize>,
+    /// Number of GPUs each backend reported at startup.
+    counts: Vec<usize>,
+    gpus: Vec<GpuInfo>,
     host: Host,
-    #[cfg(windows)]
-    pdh: Option<(crate::winpdh::Pdh, Vec<Option<crate::winpdh::Luid>>)>,
-    #[cfg(windows)]
-    mem_totals: Vec<Option<u64>>,
+    enricher: ProcEnricher,
+    pub thresholds: spill::Thresholds,
 }
 
 impl Collector {
     pub fn new(d: Detected) -> (Self, SystemInfo) {
         let host = Host::new();
         let mut info = SystemInfo { host: host.info.clone(), warnings: d.warnings, ..Default::default() };
-        let mut offsets = Vec::new();
-        for b in &d.backends {
-            offsets.push(info.gpus.len());
+        let mut counts = Vec::new();
+        for (bi, b) in d.backends.iter().enumerate() {
             info.backends.push(b.info());
-            for mut g in b.gpus() {
+            let gpus = b.gpus();
+            counts.push(gpus.len());
+            for mut g in gpus {
+                // The collector owns global numbering.
                 g.index = info.gpus.len();
+                g.backend = bi;
                 info.gpus.push(g);
             }
         }
         if info.gpus.is_empty() {
             info.warnings.push("no GPUs found".into());
         }
-        if info.host.wsl && info.gpus.iter().any(|g| g.vendor != crate::model::Vendor::Demo) {
+        if info.host.wsl && info.gpus.iter().any(|g| g.vendor != Vendor::Demo) {
             info.warnings.push("WSL: the driver doesn't expose per-process GPU data here".into());
         }
-        #[cfg(windows)]
-        let pdh = crate::winpdh::Pdh::new().map(|p| {
-            // Match each GPU to its WDDM adapter by PCI location.
-            let luids = info
-                .gpus
-                .iter()
-                .map(|g| {
-                    let loc = g.pci_bus_id.as_deref().and_then(crate::winpdh::parse_bus_id)?;
-                    p.adapters.iter().find(|(_, a)| **a == loc).map(|(l, _)| *l)
-                })
-                .collect();
-            (p, luids)
-        });
-        (
-            Collector {
-                backends: d.backends,
-                offsets,
-                host,
-                #[cfg(windows)]
-                pdh,
-                #[cfg(windows)]
-                mem_totals: info.gpus.iter().map(|g| g.memory_total).collect(),
-            },
-            info,
-        )
+        let enricher = ProcEnricher::new(&info.gpus);
+        let c =
+            Collector { backends: d.backends, counts, gpus: info.gpus.clone(), host, enricher, thresholds: spill::Thresholds::default() };
+        (c, info)
     }
 
     pub fn collect(&mut self) -> Snapshot {
-        let mut gpus = Vec::new();
+        // Backends run in parallel so a slow or hung one (NVML on a GPU that
+        // fell off the bus) doesn't hold up the others.
+        let per_backend: Vec<Vec<GpuSample>> = if self.backends.len() <= 1 {
+            self.backends.iter_mut().map(|b| b.sample()).collect()
+        } else {
+            std::thread::scope(|s| {
+                let hs: Vec<_> = self.backends.iter_mut().map(|b| s.spawn(move || b.sample())).collect();
+                hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+            })
+        };
+
+        let mut gpus = Vec::with_capacity(self.gpus.len());
         let mut procs = Vec::new();
-        for (b, &off) in self.backends.iter_mut().zip(&self.offsets) {
-            for (i, mut s) in b.sample().into_iter().enumerate() {
-                for p in s.processes.drain(..) {
-                    procs.push((off + i, p));
-                }
+        for (mut samples, &n) in per_backend.into_iter().zip(&self.counts) {
+            // Keep indices aligned with `SystemInfo::gpus` whatever a backend returns.
+            samples.resize_with(n, || GpuSample { error: Some("no sample".into()), ..Default::default() });
+            for mut s in samples {
+                let i = gpus.len();
+                procs.extend(s.processes.drain(..).map(|p| (i, p)));
                 gpus.push(s);
             }
         }
-        #[cfg(windows)]
-        if let Some((pdh, luids)) = &mut self.pdh {
-            merge_pdh(pdh.sample(), luids, &self.mem_totals, &mut procs);
+
+        self.enricher.enrich(&mut gpus, &mut procs);
+        let mut rows = self.host.processes(procs);
+        for (i, g) in gpus.iter_mut().enumerate() {
+            let mut mine: Vec<&mut ProcRow> = rows.iter_mut().filter(|r| r.gpu == i).collect();
+            g.spill = spill::analyze(&self.gpus[i], g, &mut mine, &self.thresholds);
         }
-        // Keep processes on the sample too (for JSON consumers), but the
-        // joined table is what the UI uses.
-        let rows = self.host.processes(procs);
-        for r in &rows {
-            if let Some(g) = gpus.get_mut(r.gpu) {
-                g.processes.push(crate::model::GpuProcess {
-                    pid: r.pid,
-                    pid_is_local: r.mapping != crate::model::PidMapping::External,
-                    kind: r.kind,
-                    gpu_mem: r.gpu_mem,
-                    sm_util: r.sm_util,
-                    mem_util: r.mem_util,
-                    enc_util: r.enc_util,
-                    dec_util: r.dec_util,
-                    gpu_instance: None,
-                    name: Some(r.name.clone()),
-                });
-            }
-        }
+
         Snapshot {
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
             host: self.host.sample(),
             gpus,
             processes: rows,
         }
-    }
-}
-
-/// Fill in what NVML can't report under WDDM (per-process memory and
-/// utilization) and add GPU processes it didn't list.
-#[cfg(windows)]
-fn merge_pdh(
-    usage: std::collections::HashMap<(crate::winpdh::Luid, u32), crate::winpdh::ProcUsage>,
-    luids: &[Option<crate::winpdh::Luid>],
-    totals: &[Option<u64>],
-    procs: &mut Vec<(usize, crate::model::GpuProcess)>,
-) {
-    use crate::model::{GpuProcess, ProcKind};
-    // The counters occasionally report garbage (terabytes); drop anything
-    // larger than the card.
-    let sane = |gpu: usize, v: Option<u64>| v.filter(|&b| totals.get(gpu).copied().flatten().is_none_or(|t| b <= t));
-    let mut seen = std::collections::HashSet::new();
-    for (gpu, p) in procs.iter_mut() {
-        let Some(Some(luid)) = luids.get(*gpu) else { continue };
-        seen.insert((*gpu, p.pid));
-        if let Some(u) = usage.get(&(*luid, p.pid)) {
-            p.gpu_mem = p.gpu_mem.or(sane(*gpu, u.dedicated));
-            p.sm_util = p.sm_util.or(u.util);
-            p.enc_util = p.enc_util.or(u.enc);
-            p.dec_util = p.dec_util.or(u.dec);
-        }
-    }
-    for ((luid, pid), u) in usage {
-        let Some(gpu) = luids.iter().position(|l| *l == Some(luid)) else { continue };
-        if seen.contains(&(gpu, pid)) || (u.dedicated.unwrap_or(0) == 0 && u.util.unwrap_or(0.0) <= 0.0) {
-            continue;
-        }
-        procs.push((
-            gpu,
-            GpuProcess {
-                pid,
-                pid_is_local: true,
-                kind: ProcKind::Graphics,
-                gpu_mem: sane(gpu, u.dedicated),
-                sm_util: u.util,
-                mem_util: None,
-                enc_util: u.enc,
-                dec_util: u.dec,
-                gpu_instance: None,
-                name: None,
-            },
-        ));
     }
 }
 
@@ -173,7 +106,9 @@ pub struct Sampler {
 
 impl Sampler {
     pub fn spawn(mut c: Collector, interval: Duration) -> Self {
-        let (tx, rx): (Sender<Snapshot>, _) = channel();
+        // Capacity 1: if the consumer stalls (terminal suspended), drop stale
+        // snapshots instead of queueing them.
+        let (tx, rx): (SyncSender<Snapshot>, _) = sync_channel(1);
         let ctl = Arc::new(Control {
             interval_ms: AtomicU64::new(interval.as_millis() as u64),
             paused: AtomicBool::new(false),
@@ -185,12 +120,14 @@ impl Sampler {
             .spawn(move || {
                 while !ctl2.stop.load(Ordering::Relaxed) {
                     let t0 = Instant::now();
-                    if !ctl2.paused.load(Ordering::Relaxed) && tx.send(c.collect()).is_err() {
-                        break;
+                    if !ctl2.paused.load(Ordering::Relaxed) {
+                        match tx.try_send(c.collect()) {
+                            Ok(()) | Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Disconnected(_)) => break,
+                        }
                     }
                     let iv = Duration::from_millis(ctl2.interval_ms.load(Ordering::Relaxed));
-                    let wait = iv.saturating_sub(t0.elapsed());
-                    std::thread::park_timeout(wait);
+                    std::thread::park_timeout(iv.saturating_sub(t0.elapsed()));
                 }
             })
             .expect("spawn sampler");

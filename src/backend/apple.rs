@@ -24,7 +24,7 @@ use core_foundation_sys::string::{CFStringCreateWithCString, CFStringGetCString,
 use libloading::Library;
 
 use super::Backend;
-use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, ProcKind, Vendor};
+use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Vendor};
 
 type IoObject = u32;
 
@@ -169,7 +169,8 @@ const HID_TEMPERATURE: i64 = 15;
 
 /// Temperature sensors exposed through the (unprivileged) HID event system.
 struct Thermal {
-    client: Cf,
+    /// Owns the event system the sensor services belong to; kept alive, not read.
+    _client: Cf,
     /// (name, service) for sensors that look like GPU dies.
     gpu: Vec<CFTypeRef>,
     /// SoC die sensors, used when no GPU-specific sensor exists.
@@ -225,13 +226,12 @@ impl Thermal {
             if gpu.is_empty() && die.is_empty() {
                 return None;
             }
-            Some(Thermal { client, gpu, die, _services: services })
+            Some(Thermal { _client: client, gpu, die, _services: services })
         }
     }
 
     fn read(&self) -> Option<u32> {
         let list = if self.gpu.is_empty() { &self.die } else { &self.gpu };
-        let _ = &self.client;
         let vals: Vec<f64> = list
             .iter()
             .filter_map(|&svc| unsafe {
@@ -333,9 +333,9 @@ impl IoReport {
             return None;
         }
         let cur = Cf(cur as CFTypeRef);
+        let cur_ref = cur.0;
         let now = Instant::now();
-        let Some((prev, t0)) = self.prev.replace((cur, now)) else { return None };
-        let cur_ref = self.prev.as_ref().unwrap().0.0;
+        let (prev, t0) = self.prev.replace((cur, now))?;
         let dt = now.duration_since(t0).as_secs_f64();
         let delta = Cf(unsafe { (self.delta)(prev.0 as CFDictionaryRef, cur_ref as CFDictionaryRef, std::ptr::null()) } as CFTypeRef);
         if delta.0.is_null() || dt <= 0.0 {
@@ -390,27 +390,33 @@ pub struct Apple {
 unsafe impl Send for Apple {}
 
 fn gpu_freq_table() -> Vec<u32> {
-    for e in services("AppleARMIODevice") {
-        let is_pmgr = entry_name(e) == "pmgr";
-        if is_pmgr {
-            if let Some(props) = properties(e) {
-                if let Some(bytes) = get(props.0, "voltage-states9").and_then(as_bytes) {
-                    let mut f: Vec<u32> = bytes
-                        .chunks_exact(8)
-                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                        .filter(|&v| v > 0)
-                        // Hz on recent chips, kHz on some older ones.
-                        .map(|v| if v > 10_000_000 { v / 1_000_000 } else { v / 1_000 })
-                        .collect();
-                    f.dedup();
-                    unsafe { IOObjectRelease(e) };
-                    return f;
-                }
-            }
-        }
+    let devices = services("AppleARMIODevice");
+    let table = devices
+        .iter()
+        .filter(|&&e| entry_name(e) == "pmgr")
+        .find_map(|&e| get(properties(e)?.0, "voltage-states9").and_then(as_bytes))
+        .map(|b| parse_dvfs(&b))
+        .unwrap_or_default();
+    for e in devices {
         unsafe { IOObjectRelease(e) };
     }
-    Vec::new()
+    table
+}
+
+/// DVFS table: (u32 frequency, u32 voltage) pairs, little-endian. Returns
+/// MHz, lowest first, without the "off" entry. Hz on recent chips, kHz on
+/// some older ones.
+fn parse_dvfs(bytes: &[u8]) -> Vec<u32> {
+    let mut f: Vec<u32> = bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .filter(|&v| v > 0)
+        .map(|v| if v > 10_000_000 { v / 1_000_000 } else { v / 1_000 })
+        .collect();
+    f.dedup();
+    f
 }
 
 impl Apple {
@@ -426,10 +432,10 @@ impl Apple {
         let props = properties(accel).ok_or("cannot read IOAccelerator properties")?;
         let model = get(props.0, "model").and_then(as_string).unwrap_or_else(|| "Apple GPU".into());
         let cores = get(props.0, "gpu-core-count").and_then(as_i64).map(|v| v as u32);
-        let mut info = GpuInfo::new(0, Vendor::Apple, model);
+        let mut info = GpuInfo::new(Vendor::Apple, model);
         info.cores = cores;
         info.integrated = true;
-        info.architecture = sysctl_string("machdep.cpu.brand_string");
+        info.chip = sysctl_string("machdep.cpu.brand_string");
         info.memory_total = sysctl_string("hw.memsize").and_then(|s| s.parse().ok());
         let freqs = gpu_freq_table();
         info.max_clock_graphics = freqs.last().copied();
@@ -446,30 +452,29 @@ impl Apple {
 
     fn processes(&mut self) -> Vec<GpuProcess> {
         let now = Instant::now();
-        let mut per_pid: HashMap<u32, (u64, String)> = HashMap::new();
+        let mut per_pid: HashMap<u32, u64> = HashMap::new();
         for c in children(self.accel) {
             if let Some(props) = properties(c) {
                 let creator = get(props.0, "IOUserClientCreator").and_then(as_string).unwrap_or_default();
                 // "pid 123, name"
-                if let Some((pid, name)) = creator.strip_prefix("pid ").and_then(|r| r.split_once(", ")) {
-                    if let Ok(pid) = pid.parse::<u32>() {
-                        let ns: u64 = get(props.0, "AppUsage")
-                            .map(as_array)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|u| get(u, "accumulatedGPUTime").and_then(as_i64))
-                            .map(|v| v.max(0) as u64)
-                            .sum();
-                        let e = per_pid.entry(pid).or_insert((0, name.to_string()));
-                        e.0 += ns;
-                    }
+                if let Some((pid, _name)) = creator.strip_prefix("pid ").and_then(|r| r.split_once(", "))
+                    && let Ok(pid) = pid.parse::<u32>()
+                {
+                    let ns: u64 = get(props.0, "AppUsage")
+                        .map(as_array)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|u| get(u, "accumulatedGPUTime").and_then(as_i64))
+                        .map(|v| v.max(0) as u64)
+                        .sum();
+                    *per_pid.entry(pid).or_insert(0) += ns;
                 }
             }
             unsafe { IOObjectRelease(c) };
         }
         let mut out = Vec::new();
         let mut next = HashMap::new();
-        for (pid, (ns, _name)) in per_pid {
+        for (pid, ns) in per_pid {
             let util = self.prev_gpu_time.get(&pid).map(|(prev, t)| {
                 let dt = now.duration_since(*t).as_nanos() as f64;
                 if dt > 0.0 { ((ns.saturating_sub(*prev)) as f64 / dt * 100.0).clamp(0.0, 100.0) as f32 } else { 0.0 }
@@ -479,18 +484,7 @@ impl Apple {
             if ns == 0 {
                 continue;
             }
-            out.push(GpuProcess {
-                pid,
-                pid_is_local: true,
-                kind: ProcKind::Graphics,
-                gpu_mem: None,
-                sm_util: util,
-                mem_util: None,
-                enc_util: None,
-                dec_util: None,
-                gpu_instance: None,
-                name: None,
-            });
+            out.push(GpuProcess { pid, scope: PidScope::Local, kind: ProcKind::Graphics, sm_util: util, ..Default::default() });
         }
         self.prev_gpu_time = next;
         out.sort_by_key(|p| p.pid);
@@ -510,8 +504,7 @@ impl Backend for Apple {
             name: "IOKit".into(),
             library: Some(if self.report.is_some() { "IOKit + IOReport".into() } else { "IOKit".into() }),
             driver_version: self.os_version.as_ref().map(|v| format!("macOS {v}")),
-            api_version: None,
-            runtime_version: None,
+            ..Default::default()
         }
     }
 
@@ -521,11 +514,11 @@ impl Backend for Apple {
 
     fn sample(&mut self) -> Vec<GpuSample> {
         let mut s = GpuSample::default();
-        if let Some(props) = properties(self.accel) {
-            if let Some(ps) = get(props.0, "PerformanceStatistics") {
-                s.util_gpu = get(ps, "Device Utilization %").and_then(as_i64).map(|v| v.clamp(0, 100) as f32);
-                s.mem_used = get(ps, "In use system memory").and_then(as_i64).map(|v| v.max(0) as u64);
-            }
+        if let Some(props) = properties(self.accel)
+            && let Some(ps) = get(props.0, "PerformanceStatistics")
+        {
+            s.util_gpu = get(ps, "Device Utilization %").and_then(as_i64).map(|v| v.clamp(0, 100) as f32);
+            s.mem_used = get(ps, "In use system memory").and_then(as_i64).map(|v| v.max(0) as u64);
         }
         s.mem_total = self.info.memory_total;
         s.temp = self.thermal.as_ref().and_then(|t| t.read());
@@ -553,5 +546,20 @@ impl Backend for Apple {
         }
         s.processes = self.processes();
         vec![s]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dvfs_table() {
+        let mut b = Vec::new();
+        for (f, v) in [(0u32, 125u32), (338_000_000, 590), (618_000_000, 640), (618_000_000, 640), (1_578_000_000, 900)] {
+            b.extend_from_slice(&f.to_le_bytes());
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(parse_dvfs(&b), [338, 618, 1578]);
     }
 }

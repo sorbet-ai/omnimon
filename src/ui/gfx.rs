@@ -119,9 +119,9 @@ impl Gfx {
 
     /// Draw `series` into `area` as a pixel image. `slot` identifies the chart
     /// (stable across frames); `version` changes whenever the data does.
-    fn draw_pixels(&self, f: &mut Frame, area: Rect, slot: u32, version: u64, theme: usize, series: &[Series], bg: Color) {
+    fn draw_pixels(&self, f: &mut Frame, area: Rect, slot: u32, ctx: &ChartCtx, series: &[Series]) {
         let Some(picker) = &self.picker else { return };
-        let key = (version, area, theme);
+        let key = (ctx.version, area, ctx.theme);
         let mut cache = self.cache.borrow_mut();
         let fresh = cache.get(&slot).is_some_and(|c| c.key == key);
         if !fresh {
@@ -130,13 +130,19 @@ impl Gfx {
             if w == 0 || h == 0 {
                 return;
             }
-            let img = DynamicImage::ImageRgba8(render(w, h, fs.height as f32 / 18.0, series, bg));
+            let img = DynamicImage::ImageRgba8(render(w, h, fs.height as f32 / 18.0, series, ctx.bg));
             let size = Size::new(area.width, area.height);
             let proto = match picker.protocol_type() {
                 // Reuse one kitty image id per slot so the terminal replaces the
                 // image instead of accumulating a new one every tick.
-                ProtocolType::Kitty => Kitty::new(img, size, 0x4E56_0000 | slot, picker.tmux_detected(), picker.capabilities().contains(&Capability::KittyCompression))
-                    .map(Protocol::Kitty),
+                ProtocolType::Kitty => Kitty::new(
+                    img,
+                    size,
+                    0x4E56_0000 | slot,
+                    picker.tmux_detected(),
+                    picker.capabilities().contains(&Capability::KittyCompression),
+                )
+                .map(Protocol::Kitty),
                 _ => picker.new_protocol(img, size, ratatui_image::Resize::Fit(None)),
             };
             match proto {
@@ -203,7 +209,7 @@ impl ChartCtx<'_> {
             return;
         }
         if self.pixels() {
-            self.gfx.draw_pixels(f, area, slot, self.version, self.theme, series, self.bg);
+            self.gfx.draw_pixels(f, area, slot, self, series);
             return;
         }
         let mirrored = series.iter().any(|s| s.down) && series.iter().any(|s| !s.down);
@@ -229,11 +235,21 @@ impl ChartCtx<'_> {
 fn sk(c: Color, alpha: f32) -> tiny_skia::Color {
     let (r, g, b) = match c {
         Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(i) => (i, i, i),
+        // xterm-256: 6x6x6 cube, then a 24-step grey ramp.
+        Color::Indexed(i @ 16..=231) => {
+            let lv = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
+            let i = i - 16;
+            (lv(i / 36), lv((i / 6) % 6), lv(i % 6))
+        }
+        Color::Indexed(i @ 232..=255) => {
+            let v = 8 + 10 * (i - 232);
+            (v, v, v)
+        }
         Color::Black => (0, 0, 0),
         Color::White => (255, 255, 255),
         Color::DarkGray => (90, 90, 90),
-        _ => (180, 180, 180),
+        Color::Gray => (170, 170, 170),
+        _ => (200, 200, 200),
     };
     tiny_skia::Color::from_rgba8(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0) as u8)
 }
@@ -268,8 +284,7 @@ pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaI
     grid.set_color(sk(grid_col, 1.0));
     grid.anti_alias = false;
     let grid_stroke = Stroke { width: 1.0, ..Default::default() };
-    let lines: &[f32] = if mirrored { &[0.25, 0.5, 0.75] } else { &[0.25, 0.5, 0.75] };
-    for &q in lines {
+    for q in [0.25, 0.5, 0.75] {
         let y = (hf * q).round() + 0.5;
         let mut pb = PathBuilder::new();
         pb.move_to(0.0, y);
@@ -404,18 +419,19 @@ mod tests {
     use super::*;
     use crate::ui::theme::THEMES;
 
-    /// Renders sample charts to target/chart-*.png for eyeballing.
+    /// Renders sample charts (to the temp dir) for eyeballing.
     #[test]
     fn renders_sample_charts() {
         let t = &THEMES[0];
         let util: Vec<Option<f64>> = (0..120).map(|i| Some((0.55 + 0.4 * ((i as f64) / 9.0).sin()).clamp(0.0, 1.0))).collect();
         let mem: Vec<Option<f64>> = (0..120).map(|i| if i < 10 { None } else { Some(0.3 + 0.002 * i as f64) }).collect();
         let bg = Color::Rgb(26, 27, 38);
-        let img = render(900, 220, 1.0, &[Series { data: &util, grad: t.util, down: false }, Series { data: &mem, grad: t.mem, down: true }], bg);
+        let img =
+            render(900, 220, 1.0, &[Series { data: &util, grad: t.util, down: false }, Series { data: &mem, grad: t.mem, down: true }], bg);
         assert_eq!(img.dimensions(), (900, 220));
-        let _ = std::fs::create_dir_all("target");
-        let _ = img.save("target/chart-mirrored.png");
+        let dir = std::env::temp_dir();
+        let _ = img.save(dir.join("chart-mirrored.png"));
         let img = render(600, 300, 1.0, &[Series { data: &util, grad: t.power, down: false }], bg);
-        let _ = img.save("target/chart-single.png");
+        let _ = img.save(dir.join("chart-single.png"));
     }
 }

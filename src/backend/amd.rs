@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use super::Backend;
 use super::drm_fdinfo::Scanner;
-use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, ProcKind, Vendor};
+use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Vendor};
 
 struct Card {
     dev: PathBuf,
@@ -100,14 +100,12 @@ impl Amd {
             if driver.as_deref().is_some_and(|d| d != "amdgpu") {
                 continue;
             }
-            let pdev = fs::canonicalize(&dev)
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_default();
+            let pdev =
+                fs::canonicalize(&dev).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
             let hwmon = find_hwmon(&dev);
             let devid = read(&dev.join("device")).unwrap_or_default();
             let name = read(&dev.join("product_name")).unwrap_or_else(|| format!("AMD Radeon GPU ({devid})"));
-            let mut info = GpuInfo::new(cards.len(), Vendor::Amd, name);
+            let mut info = GpuInfo::new(Vendor::Amd, name);
             info.pci_bus_id = Some(pdev.clone()).filter(|s| !s.is_empty());
             info.uuid = read(&dev.join("unique_id"));
             info.vbios = read(&dev.join("vbios_version"));
@@ -130,17 +128,13 @@ impl Amd {
         if cards.is_empty() {
             return Err("no amdgpu devices".into());
         }
-        Ok(Amd {
-            cards,
-            scanner: Scanner::default(),
-            driver_version: read(Path::new("/sys/module/amdgpu/version")),
-        })
+        Ok(Amd { cards, scanner: Scanner::default(), driver_version: read(Path::new("/sys/module/amdgpu/version")) })
     }
 }
 
 impl Backend for Amd {
     fn info(&self) -> BackendInfo {
-        BackendInfo { name: "amdgpu sysfs".into(), library: None, driver_version: self.driver_version.clone(), api_version: None, runtime_version: None }
+        BackendInfo { name: "amdgpu sysfs".into(), driver_version: self.driver_version.clone(), ..Default::default() }
     }
 
     fn gpus(&self) -> Vec<GpuInfo> {
@@ -158,6 +152,8 @@ impl Backend for Amd {
                     util_mem: read_u64(&d.join("mem_busy_percent")).map(|v| v as f32),
                     mem_used: read_u64(&d.join("mem_info_vram_used")),
                     mem_total: read_u64(&d.join("mem_info_vram_total")),
+                    // GTT = GPU-mapped system memory; on a full dGPU it is where spill lands.
+                    mem_shared: read_u64(&d.join("mem_info_gtt_used")).filter(|_| !c.info.integrated),
                     pcie_gen: read(&d.join("current_link_speed")).and_then(|s| pcie_gen(&s)),
                     pcie_width: read(&d.join("current_link_width")).and_then(|s| s.parse().ok()),
                     ..Default::default()
@@ -167,7 +163,9 @@ impl Backend for Amd {
                 s.clock_graphics = sclk;
                 s.clock_mem = mclk;
                 if let Some(h) = &c.hwmon {
-                    s.temp = temp(h, "junction").or_else(|| temp(h, "edge")).or_else(|| read_u64(&h.join("temp1_input")).map(|m| (m / 1000) as u32));
+                    s.temp = temp(h, "junction")
+                        .or_else(|| temp(h, "edge"))
+                        .or_else(|| read_u64(&h.join("temp1_input")).map(|m| (m / 1000) as u32));
                     s.temp_mem = temp(h, "mem");
                     s.power = read_u64(&h.join("power1_average")).or_else(|| read_u64(&h.join("power1_input"))).map(|u| u as f64 / 1e6);
                     s.power_limit = read_u64(&h.join("power1_cap")).map(|u| u as f64 / 1e6);
@@ -184,18 +182,17 @@ impl Backend for Amd {
                 }
                 s.processes = usage
                     .iter()
-                    .filter(|((pdev, _), _)| pdev == &c.pdev || pdev.is_empty() && self.cards.len() == 1)
+                    .filter(|((pdev, _), _)| pdev == &c.pdev || (pdev.is_empty() && self.cards.len() == 1))
                     .map(|((_, pid), u)| GpuProcess {
                         pid: *pid,
-                        pid_is_local: true,
+                        scope: PidScope::Local,
                         kind: ProcKind::Graphics,
                         gpu_mem: u.vram,
+                        gpu_mem_shared: u.gtt,
                         sm_util: u.util,
-                        mem_util: None,
                         enc_util: u.enc,
                         dec_util: u.dec,
-                        gpu_instance: None,
-                        name: None,
+                        ..Default::default()
                     })
                     .collect();
                 s.processes.sort_by_key(|p| p.pid);

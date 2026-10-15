@@ -15,3 +15,7 @@ pub fn env_var(suffix: &str) -> String {
 pub fn env(suffix: &str) -> Option<String> {
     std::env::var(env_var(suffix)).ok().filter(|v| !v.is_empty())
 }
+
+/// Prometheus metric namespace. Defaults to the app name, but dashboards key
+/// on it, so it can be pinned here independently of a rename.
+pub const METRIC_NS: &str = env!("CARGO_PKG_NAME");

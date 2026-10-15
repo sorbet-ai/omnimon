@@ -8,7 +8,7 @@ use std::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void};
 use ffi::*;
 
 use super::Backend;
-use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, ProcKind, Vendor};
+use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
 
 /// Call an optional NVML function pointer; `Err(code)` on failure.
 macro_rules! call {
@@ -69,8 +69,6 @@ struct Dev {
     h: Handle,
     info: GpuInfo,
     unsupported: u64,
-    /// Last CPU timestamp (us) seen from nvmlDeviceGetProcessUtilization.
-    last_util_ts: u64,
 }
 
 impl Dev {
@@ -82,7 +80,7 @@ impl Dev {
         }
         match f() {
             Ok(v) => Some(v),
-            Err(NVML_ERROR_NOT_SUPPORTED | NVML_ERROR_FUNCTION_NOT_FOUND | NVML_ERROR_INVALID_ARGUMENT) => {
+            Err(NVML_ERROR_NOT_SUPPORTED | NVML_ERROR_FUNCTION_NOT_FOUND) => {
                 self.unsupported |= bit;
                 None
             }
@@ -102,10 +100,8 @@ pub struct Nvml {
 impl Nvml {
     pub fn new() -> Result<Self, String> {
         let api = Api::load()?;
-        let r = match (api.init_v2, api.init_v1) {
-            (Some(f), _) | (None, Some(f)) => unsafe { f() },
-            _ => unreachable!(),
-        };
+        // Api::load only succeeds when one of the init entry points exists.
+        let r = call!(api.init_v2.or(api.init_v1)).err().unwrap_or(NVML_SUCCESS);
         if r != NVML_SUCCESS {
             return Err(format!("NVML init failed ({}): {}", api.path, api.err_str(r)));
         }
@@ -118,17 +114,11 @@ impl Nvml {
             .ok()
             .filter(|_| cuda > 0)
             .map(|_| format!("{}.{}", cuda / 1000, (cuda % 1000) / 10));
-        let driver_major: u32 = driver
-            .as_deref()
-            .and_then(|d| d.split('.').next())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let driver_major: u32 = driver.as_deref().and_then(|d| d.split('.').next()).and_then(|s| s.parse().ok()).unwrap_or(0);
         // r530 briefly appended `usedGpuCcProtectedMemory` to nvmlProcessInfo_t
         // (32 bytes); r535 moved it to the DetailList API. Identify that NVML by
         // its symbol set (same trick as nvitop), with the version as a backup.
-        let legacy_v3 = (api.conf_compute_mem_size_info.is_some() && api.running_process_detail_list.is_none())
-            || (530..535).contains(&driver_major);
-        let v3_stride = if legacy_v3 { 32 } else { 24 };
+        let v3_stride = v3_stride(api.conf_compute_mem_size_info.is_some(), api.running_process_detail_list.is_some(), driver_major);
 
         let mut count: c_uint = 0;
         call!(api.count_v2, &mut count)
@@ -139,12 +129,13 @@ impl Nvml {
         for i in 0..count {
             let mut h: nvmlDevice_t = std::ptr::null_mut();
             let r = call!(api.handle_by_index_v2, i, &mut h).or_else(|_| call!(api.handle_by_index_v1, i, &mut h));
-            if r.is_err() {
+            if let Err(e) = r {
                 // e.g. a GPU we lack permission for; skip it rather than fail.
+                log::debug!("NVML device {i}: {}", api.err_str(e));
                 continue;
             }
-            let info = static_info(&api, h, i as usize);
-            devs.push(Dev { h: Handle(h), info, unsupported: 0, last_util_ts: 0 });
+            let info = static_info(&api, h);
+            devs.push(Dev { h: Handle(h), info, unsupported: 0 });
         }
 
         let info = BackendInfo {
@@ -153,6 +144,7 @@ impl Nvml {
             driver_version: driver,
             api_version: nvml_ver,
             runtime_version: cuda,
+            runtime_name: Some("CUDA".into()),
         };
         Ok(Nvml { api, devs, info, v3_stride })
     }
@@ -204,7 +196,11 @@ fn dev_u32(f: Option<unsafe extern "C" fn(nvmlDevice_t, *mut c_uint) -> nvmlRetu
     call!(f, h, &mut v).ok().map(|_| v)
 }
 
-fn dev_u32_arg(f: Option<unsafe extern "C" fn(nvmlDevice_t, c_uint, *mut c_uint) -> nvmlReturn_t>, h: nvmlDevice_t, a: c_uint) -> Result<u32, nvmlReturn_t> {
+fn dev_u32_arg(
+    f: Option<unsafe extern "C" fn(nvmlDevice_t, c_uint, *mut c_uint) -> nvmlReturn_t>,
+    h: nvmlDevice_t,
+    a: c_uint,
+) -> Result<u32, nvmlReturn_t> {
     let mut v: c_uint = 0;
     call!(f, h, a, &mut v).map(|_| v)
 }
@@ -224,9 +220,9 @@ fn arch_name(a: u32) -> Option<&'static str> {
     })
 }
 
-fn static_info(api: &Api, h: nvmlDevice_t, index: usize) -> GpuInfo {
-    let name = dev_string(api.name, h).unwrap_or_else(|| format!("NVIDIA GPU {index}"));
-    let mut g = GpuInfo::new(index, Vendor::Nvidia, name);
+fn static_info(api: &Api, h: nvmlDevice_t) -> GpuInfo {
+    let name = dev_string(api.name, h).unwrap_or_else(|| "NVIDIA GPU".into());
+    let mut g = GpuInfo::new(Vendor::Nvidia, name);
     g.uuid = dev_string(api.uuid, h);
     g.serial = dev_string(api.serial, h).filter(|s| s != "0" && !s.starts_with("N/A"));
     g.vbios = dev_string(api.vbios, h);
@@ -275,6 +271,11 @@ fn static_info(api: &Api, h: nvmlDevice_t, index: usize) -> GpuInfo {
     g.max_clock_sm = dev_u32_arg(api.max_clock_info, h, NVML_CLOCK_SM).ok().filter(|&v| v > 0);
     g.max_clock_mem = dev_u32_arg(api.max_clock_info, h, NVML_CLOCK_MEM).ok().filter(|&v| v > 0);
     g.max_clock_video = dev_u32_arg(api.max_clock_info, h, NVML_CLOCK_VIDEO).ok().filter(|&v| v > 0);
+    // GDDR and HBM both transfer twice per reported memory clock.
+    g.memory_bandwidth = match (g.max_clock_mem, dev_u32(api.memory_bus_width, h)) {
+        (Some(mhz), Some(bits)) if bits > 0 => Some(mhz as f64 * 1e6 * 2.0 * bits as f64 / 8.0),
+        _ => None,
+    };
     g.pcie_max_gen = dev_u32(api.pcie_max_gen, h);
     g.pcie_max_width = dev_u32(api.pcie_max_width, h);
     g.temp_shutdown = dev_u32_arg(api.temperature_threshold, h, NVML_TEMPERATURE_THRESHOLD_SHUTDOWN).ok().filter(|&v| v > 0);
@@ -283,19 +284,19 @@ fn static_info(api: &Api, h: nvmlDevice_t, index: usize) -> GpuInfo {
     g
 }
 
-fn throttle_names(bits: u64) -> Vec<String> {
-    const NAMES: [(u64, &str); 9] = [
-        (0x1, "idle"),
-        (0x2, "app clocks"),
-        (0x4, "power cap"),
-        (0x8, "hw slowdown"),
-        (0x10, "sync boost"),
-        (0x20, "sw thermal"),
-        (0x40, "hw thermal"),
-        (0x80, "power brake"),
-        (0x100, "display clocks"),
+fn throttle_reasons(bits: u64) -> Vec<Throttle> {
+    const MAP: [(u64, Throttle); 9] = [
+        (0x1, Throttle::Idle),
+        (0x2, Throttle::AppClocks),
+        (0x4, Throttle::PowerCap),
+        (0x8, Throttle::HwSlowdown),
+        (0x10, Throttle::SyncBoost),
+        (0x20, Throttle::SwThermal),
+        (0x40, Throttle::HwThermal),
+        (0x80, Throttle::PowerBrake),
+        (0x100, Throttle::DisplayClocks),
     ];
-    NAMES.iter().filter(|(b, _)| bits & b != 0).map(|(_, n)| n.to_string()).collect()
+    MAP.iter().filter(|(b, _)| bits & b != 0).map(|(_, t)| t.clone()).collect()
 }
 
 fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
@@ -304,9 +305,7 @@ fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
 
     // Memory: v2 excludes driver-reserved memory from `used` (matches nvidia-smi).
     let mut m2 = nvmlMemory_v2_t { version: NVML_MEMORY_V2, ..Default::default() };
-    let mut lost = false;
-    let v2 = d.q(M::MemV2, || call!(api.memory_v2, h, &mut m2).map(|_| ()));
-    if v2.is_some() {
+    if d.q(M::MemV2, || call!(api.memory_v2, h, &mut m2)).is_some() {
         s.mem_used = Some(m2.used);
         s.mem_total = Some(m2.total);
         s.mem_reserved = Some(m2.reserved);
@@ -317,13 +316,12 @@ fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
                 s.mem_used = Some(m1.used);
                 s.mem_total = Some(m1.total);
             }
-            Err(NVML_ERROR_GPU_IS_LOST) => lost = true,
+            Err(NVML_ERROR_GPU_IS_LOST) => {
+                s.error = Some("GPU is lost (fell off the bus)".into());
+                return s;
+            }
             Err(_) => {}
         }
-    }
-    if lost {
-        s.error = Some("GPU is lost (fell off the bus)".into());
-        return s;
     }
 
     let mut u = nvmlUtilization_t::default();
@@ -418,11 +416,9 @@ fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
 
     if let Some(bits) = d.q(M::Throttle, || {
         let mut v: c_ulonglong = 0;
-        call!(api.clocks_event_reasons, h, &mut v)
-            .or_else(|_| call!(api.clocks_throttle_reasons, h, &mut v))
-            .map(|_| v)
+        call!(api.clocks_event_reasons, h, &mut v).or_else(|_| call!(api.clocks_throttle_reasons, h, &mut v)).map(|_| v)
     }) {
-        s.throttle = throttle_names(bits);
+        s.throttle = throttle_reasons(bits);
     }
 
     let ecc = |t: c_uint| {
@@ -476,36 +472,52 @@ fn list_procs(h: nvmlDevice_t, v3: ProcFn, v2: ProcFn, v1: ProcFn, v3_stride: us
         return Err(r);
     }
     let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len() * 8) };
-    let n = cap as usize;
-
-    let parse = |stride: usize| -> Option<Vec<RawProc>> {
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let o = i * stride;
-            let pid = u32::from_ne_bytes(bytes[o..o + 4].try_into().ok()?);
-            let mem = u64::from_ne_bytes(bytes[o + 8..o + 16].try_into().ok()?);
-            let gi = if stride >= 24 { Some(u32::from_ne_bytes(bytes[o + 16..o + 20].try_into().ok()?)) } else { None };
-            if pid == 0 || pid > (1 << 30) {
-                return None;
-            }
-            if let Some(g) = gi
-                && g != u32::MAX && g > 64 {
-                    return None;
-                }
-            out.push(RawProc {
-                pid,
-                mem: (mem != NVML_VALUE_NOT_AVAILABLE).then_some(mem),
-                gpu_instance: gi.filter(|&g| g != u32::MAX),
-            });
-        }
-        Some(out)
-    };
-    for &st in strides {
-        if let Some(v) = parse(st) {
-            return Ok(v);
+    let n = (cap as usize).min(bytes.len() / 32);
+    match strides.iter().find_map(|&st| parse_proc_infos(bytes, n, st)) {
+        Some(v) => Ok(v),
+        None => {
+            log::debug!("nvmlProcessInfo_t layout not recognised ({n} entries); process list skipped");
+            Ok(Vec::new())
         }
     }
-    Ok(Vec::new())
+}
+
+/// Stride of the `_v3` nvmlProcessInfo_t. r530 briefly appended
+/// `usedGpuCcProtectedMemory` (32 bytes); r535 moved it to the DetailList
+/// API. That NVML is identified by its symbol set (same trick as nvitop),
+/// with the driver version as a backup.
+fn v3_stride(has_conf_compute_mem: bool, has_detail_list: bool, driver_major: u32) -> usize {
+    if (has_conf_compute_mem && !has_detail_list) || (530..535).contains(&driver_major) { 32 } else { 24 }
+}
+
+/// Parse `n` nvmlProcessInfo entries at `stride` bytes, or None if the bytes
+/// don't look like that layout. A wrong stride shows up as zero/huge or
+/// repeated PIDs, junk instance ids, or (for 32 bytes) a non-zero tail.
+fn parse_proc_infos(bytes: &[u8], n: usize, stride: usize) -> Option<Vec<RawProc>> {
+    let u32_at = |o: usize| bytes.get(o..o + 4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
+    let u64_at = |o: usize| bytes.get(o..o + 8).map(|b| u64::from_ne_bytes(b.try_into().unwrap()));
+    let mut out = Vec::with_capacity(n);
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..n {
+        let o = i * stride;
+        let pid = u32_at(o)?;
+        let mem = u64_at(o + 8)?;
+        let gi = if stride >= 24 { Some(u32_at(o + 16)?) } else { None };
+        if pid == 0 || pid > (1 << 30) || !seen.insert(pid) {
+            return None;
+        }
+        if gi.is_some_and(|g| g != u32::MAX && g > 64) {
+            return None;
+        }
+        if stride == 32 {
+            let tail = u64_at(o + 24)?;
+            if tail != 0 && tail != NVML_VALUE_NOT_AVAILABLE && tail > mem {
+                return None;
+            }
+        }
+        out.push(RawProc { pid, mem: (mem != NVML_VALUE_NOT_AVAILABLE).then_some(mem), gpu_instance: gi.filter(|&g| g != u32::MAX) });
+    }
+    Some(out)
 }
 
 fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
@@ -523,22 +535,20 @@ fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
                 })
                 .or_insert(GpuProcess {
                     pid: p.pid,
-                    pid_is_local: false,
+                    // NVML reports host PIDs; on Windows there is only one namespace.
+                    scope: if cfg!(windows) { PidScope::Local } else { PidScope::Driver },
                     kind,
                     gpu_mem: p.mem,
-                    sm_util: None,
-                    mem_util: None,
-                    enc_util: None,
-                    dec_util: None,
                     gpu_instance: p.gpu_instance,
-                    name: None,
+                    ..Default::default()
                 });
         }
     };
     if let Some(l) = d.q(M::ComputeProcs, || list_procs(h, api.compute_procs_v3, api.compute_procs_v2, api.compute_procs_v1, v3_stride)) {
         add(l, ProcKind::Compute);
     }
-    if let Some(l) = d.q(M::GraphicsProcs, || list_procs(h, api.graphics_procs_v3, api.graphics_procs_v2, api.graphics_procs_v1, v3_stride)) {
+    if let Some(l) = d.q(M::GraphicsProcs, || list_procs(h, api.graphics_procs_v3, api.graphics_procs_v2, api.graphics_procs_v1, v3_stride))
+    {
         add(l, ProcKind::Graphics);
     }
     if let Some(l) = d.q(M::MpsProcs, || list_procs(h, api.mps_procs_v3, api.mps_procs_v2, None, v3_stride)) {
@@ -548,11 +558,8 @@ fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
     if !map.is_empty() {
         // Look back ~1s (like nvitop) so the sample buffer is never empty just
         // because our tick and the driver's sampling period don't line up.
-        let now_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as u64)
-            .unwrap_or(0);
-        let last = now_us.saturating_sub(1_500_000).max(d.last_util_ts.saturating_sub(1_000_000));
+        let now_us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros() as u64).unwrap_or(0);
+        let last = now_us.saturating_sub(1_500_000);
         let samples = d.q(M::ProcUtil, || {
             let mut n: c_uint = 0;
             let r = call!(api.process_utilization, h, std::ptr::null_mut(), &mut n, last);
@@ -577,7 +584,6 @@ fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
             // Keep the newest sample per pid.
             let mut newest: HashMap<u32, nvmlProcessUtilizationSample_t> = HashMap::new();
             for smp in samples {
-                d.last_util_ts = d.last_util_ts.max(smp.time_stamp);
                 let e = newest.entry(smp.pid).or_insert(smp);
                 if smp.time_stamp > e.time_stamp {
                     *e = smp;
@@ -608,4 +614,53 @@ fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
     let mut v: Vec<GpuProcess> = map.into_values().collect();
     v.sort_by_key(|p| p.pid);
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(stride: usize, list: &[(u32, u64)]) -> Vec<u8> {
+        let mut b = vec![0u8; stride * list.len() + 64];
+        for (i, &(pid, mem)) in list.iter().enumerate() {
+            let o = i * stride;
+            b[o..o + 4].copy_from_slice(&pid.to_ne_bytes());
+            b[o + 8..o + 16].copy_from_slice(&mem.to_ne_bytes());
+            if stride >= 24 {
+                b[o + 16..o + 20].copy_from_slice(&u32::MAX.to_ne_bytes());
+                b[o + 20..o + 24].copy_from_slice(&u32::MAX.to_ne_bytes());
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn parses_each_layout() {
+        let list = [(1234, 1 << 30), (5678, NVML_VALUE_NOT_AVAILABLE), (42, 7)];
+        for stride in [16, 24, 32] {
+            let v = parse_proc_infos(&entries(stride, &list), 3, stride).unwrap();
+            assert_eq!(v.iter().map(|p| p.pid).collect::<Vec<_>>(), [1234, 5678, 42]);
+            assert_eq!(v[1].mem, None);
+            assert!(v.iter().all(|p| p.gpu_instance.is_none()));
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_stride() {
+        // 24-byte entries read as 32-byte ones land inside other entries.
+        let b = entries(24, &[(1234, 1 << 30), (5678, 2 << 30), (91, 3 << 30)]);
+        assert!(parse_proc_infos(&b, 3, 32).is_none());
+        assert!(parse_proc_infos(&b, 3, 24).is_some());
+        // 32-byte entries read at 24 hit the zero padding: pid 0.
+        let b = entries(32, &[(1234, 1 << 30), (5678, 2 << 30)]);
+        assert!(parse_proc_infos(&b, 2, 24).is_none());
+    }
+
+    #[test]
+    fn stride_selection() {
+        assert_eq!(v3_stride(true, false, 550), 32);
+        assert_eq!(v3_stride(true, true, 550), 24);
+        assert_eq!(v3_stride(false, false, 531), 32);
+        assert_eq!(v3_stride(false, false, 610), 24);
+    }
 }

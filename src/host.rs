@@ -5,13 +5,15 @@ use std::collections::HashMap;
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind, Users};
 
-use crate::model::{GpuProcess, HostInfo, HostSample, PidMapping, ProcRow};
-use crate::pidmap::PidMapper;
+use crate::model::{GpuProcess, HostInfo, HostSample, PidMapping, PidScope, ProcRow};
+use crate::os::PidResolver;
 
 pub struct Host {
     sys: System,
     users: Users,
-    mapper: PidMapper,
+    /// uid -> user name (users rarely change; refreshed on a miss).
+    user_names: HashMap<String, Option<String>>,
+    mapper: PidResolver,
     pub info: HostInfo,
 }
 
@@ -61,6 +63,7 @@ impl Host {
         sys.refresh_cpu_all();
         sys.refresh_memory();
         let container = detect_container();
+        let in_container = container.is_some();
         let info = HostInfo {
             hostname: System::host_name().unwrap_or_else(|| "localhost".into()),
             os: System::long_os_version().or_else(System::name).unwrap_or_else(|| std::env::consts::OS.into()),
@@ -68,14 +71,9 @@ impl Host {
             cpu_brand: sys.cpus().first().map(|c| c.brand().trim().to_string()).unwrap_or_default(),
             cpu_cores: sys.cpus().len(),
             wsl: detect_wsl(),
-            container: container.clone(),
+            container,
         };
-        Host {
-            sys,
-            users: Users::new_with_refreshed_list(),
-            mapper: PidMapper::new(container.is_some()),
-            info,
-        }
+        Host { sys, users: Users::new_with_refreshed_list(), user_names: HashMap::new(), mapper: PidResolver::new(in_container), info }
     }
 
     pub fn sample(&mut self) -> HostSample {
@@ -101,14 +99,25 @@ impl Host {
 
     /// Join (gpu index, process) pairs with OS info.
     pub fn processes(&mut self, procs: Vec<(usize, GpuProcess)>) -> Vec<ProcRow> {
-        let driver_pids: Vec<u32> = procs.iter().filter(|(_, p)| p.name.is_none() && !p.pid_is_local).map(|(_, p)| p.pid).collect();
+        let driver_pids: Vec<u32> = procs.iter().filter(|(_, p)| p.scope == PidScope::Driver).map(|(_, p)| p.pid).collect();
         let map = self.mapper.resolve(&driver_pids);
 
-        let local: Vec<Pid> = map
-            .values()
-            .filter_map(|(l, _)| l.map(Pid::from_u32))
-            .chain(procs.iter().filter(|(_, p)| p.pid_is_local && p.name.is_none()).map(|(_, p)| Pid::from_u32(p.pid)))
+        let resolve = |p: &GpuProcess| -> (Option<u32>, PidMapping) {
+            match p.scope {
+                PidScope::Synthetic => (None, PidMapping::Direct),
+                PidScope::Local => (Some(p.pid), PidMapping::Direct),
+                PidScope::Driver => map.get(&p.pid).copied().unwrap_or((None, PidMapping::External)),
+            }
+        };
+        let joined: Vec<(usize, GpuProcess, Option<u32>, PidMapping)> = procs
+            .into_iter()
+            .map(|(gpu, p)| {
+                let (l, m) = resolve(&p);
+                (gpu, p, l, m)
+            })
             .collect();
+
+        let local: Vec<Pid> = joined.iter().filter_map(|j| j.2.map(Pid::from_u32)).collect();
         if !local.is_empty() {
             let kind = ProcessRefreshKind::nothing()
                 .with_cpu()
@@ -118,30 +127,24 @@ impl Host {
             self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&local), true, kind);
         }
 
-        let mut user_cache: HashMap<String, Option<String>> = HashMap::new();
-        procs
+        joined
             .into_iter()
-            .map(|(gpu, p)| {
-                // Backends that already know the process (demo, OS counters) skip mapping.
-                let (local_pid, mapping) = if p.name.is_some() {
-                    (None, PidMapping::Direct)
-                } else if p.pid_is_local {
-                    (Some(p.pid), PidMapping::Direct)
-                } else {
-                    map.get(&p.pid).copied().unwrap_or((None, PidMapping::External))
-                };
+            .map(|(gpu, usage, local_pid, mapping)| {
                 let os = local_pid.and_then(|l| self.sys.process(Pid::from_u32(l)));
                 let (name, cmdline, user, cpu, rss, runtime) = match os {
                     Some(o) => {
-                        let cmd: Vec<String> = o.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
                         let user = o.user_id().and_then(|uid| {
-                            let key = uid.to_string();
-                            user_cache
-                                .entry(key)
-                                .or_insert_with(|| self.users.get_user_by_id(uid).map(|u| u.name().to_string()))
+                            let users = &mut self.users;
+                            self.user_names
+                                .entry(uid.to_string())
+                                .or_insert_with(|| {
+                                    users.refresh();
+                                    users.get_user_by_id(uid).map(|u| u.name().to_string())
+                                })
                                 .clone()
                         });
                         let name = o.name().to_string_lossy().into_owned();
+                        let cmd: Vec<String> = o.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
                         let mut cmdline = if cmd.is_empty() { name.clone() } else { cmd.join(" ") };
                         if name.eq_ignore_ascii_case("vmwp.exe") {
                             // GPU work done inside WSL2 / Docker Desktop / Hyper-V VMs is
@@ -151,31 +154,14 @@ impl Host {
                         (name, cmdline, user, Some(o.cpu_usage()), Some(o.memory()), Some(o.run_time()))
                     }
                     None => {
-                        let n = p.name.clone().unwrap_or_else(|| match mapping {
+                        let n = usage.name_hint.clone().unwrap_or_else(|| match mapping {
                             PidMapping::External => "[outside this namespace]".into(),
                             _ => "?".into(),
                         });
                         (n.clone(), n, None, None, None, None)
                     }
                 };
-                ProcRow {
-                    gpu,
-                    pid: p.pid,
-                    local_pid,
-                    mapping,
-                    kind: p.kind,
-                    gpu_mem: p.gpu_mem,
-                    sm_util: p.sm_util,
-                    mem_util: p.mem_util,
-                    enc_util: p.enc_util,
-                    dec_util: p.dec_util,
-                    name,
-                    cmdline,
-                    user,
-                    cpu,
-                    rss,
-                    runtime,
-                }
+                ProcRow { gpu, usage, local_pid, mapping, name, cmdline, user, cpu, rss, runtime, spilling: false }
             })
             .collect()
     }
@@ -189,7 +175,16 @@ pub enum KillSignal {
 }
 
 impl KillSignal {
+    /// Signals this platform can actually deliver. Windows only has
+    /// TerminateProcess.
+    pub fn available() -> &'static [KillSignal] {
+        if cfg!(windows) { &[KillSignal::Kill] } else { &[KillSignal::Interrupt, KillSignal::Terminate, KillSignal::Kill] }
+    }
+
     pub fn label(self) -> &'static str {
+        if cfg!(windows) {
+            return "terminate";
+        }
         match self {
             KillSignal::Interrupt => "SIGINT",
             KillSignal::Terminate => "SIGTERM",

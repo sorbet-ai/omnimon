@@ -12,7 +12,7 @@ use crate::brand::APP_NAME;
 pub struct Config {
     pub theme: Option<String>,
     pub interval: Option<f64>,
-    pub sort: Option<String>,
+    pub sort: Option<crate::ui::SortKey>,
     pub sort_desc: Option<bool>,
     pub full_cmd: Option<bool>,
     pub chart_style: Option<crate::ui::ChartStyle>,
@@ -33,10 +33,7 @@ pub fn path() -> Option<PathBuf> {
 }
 
 pub fn load() -> Config {
-    path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 /// Best effort; a read-only home (containers) is fine.

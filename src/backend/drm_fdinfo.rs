@@ -22,6 +22,8 @@ pub struct ClientInfo {
     pub capacity: HashMap<String, u64>,
     /// VRAM bytes (resident if reported, else total / legacy memory key).
     pub vram: Option<u64>,
+    /// GPU-mapped system memory (GTT) bytes.
+    pub gtt: Option<u64>,
 }
 
 fn parse_size(v: &str) -> Option<u64> {
@@ -38,6 +40,7 @@ fn parse_size(v: &str) -> Option<u64> {
 pub fn parse(text: &str) -> Option<ClientInfo> {
     let mut c = ClientInfo::default();
     let (mut resident, mut total, mut legacy) = (None, None, None);
+    let (mut gtt_resident, mut gtt_legacy) = (None, None);
     for line in text.lines() {
         let Some((k, v)) = line.split_once(':') else { continue };
         let v = v.trim();
@@ -48,6 +51,8 @@ pub fn parse(text: &str) -> Option<ClientInfo> {
             "drm-resident-vram" | "drm-resident-local0" | "drm-resident-vram0" => resident = parse_size(v),
             "drm-total-vram" | "drm-total-local0" | "drm-total-vram0" => total = parse_size(v),
             "drm-memory-vram" => legacy = parse_size(v),
+            "drm-resident-gtt" => gtt_resident = parse_size(v),
+            "drm-memory-gtt" => gtt_legacy = parse_size(v),
             k => {
                 if let Some(e) = k.strip_prefix("drm-engine-capacity-") {
                     if let Ok(n) = v.parse() {
@@ -62,6 +67,7 @@ pub fn parse(text: &str) -> Option<ClientInfo> {
         }
     }
     c.vram = resident.or(legacy).or(total);
+    c.gtt = gtt_resident.or(gtt_legacy);
     (!c.driver.is_empty()).then_some(c)
 }
 
@@ -69,6 +75,7 @@ pub fn parse(text: &str) -> Option<ClientInfo> {
 #[derive(Debug, Default, Clone)]
 pub struct ProcUsage {
     pub vram: Option<u64>,
+    pub gtt: Option<u64>,
     /// Busiest engine, percent.
     pub util: Option<f32>,
     pub enc: Option<f32>,
@@ -114,6 +121,9 @@ impl Scanner {
                 let u = out.entry((pdev, pid)).or_default();
                 if let Some(v) = c.vram {
                     u.vram = Some(u.vram.unwrap_or(0) + v);
+                }
+                if let Some(v) = c.gtt {
+                    u.gtt = Some(u.gtt.unwrap_or(0) + v);
                 }
                 if let Some((prev, t)) = self.prev.get(&key) {
                     let dt = now.duration_since(*t).as_nanos() as f64;

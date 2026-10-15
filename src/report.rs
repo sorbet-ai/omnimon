@@ -1,10 +1,31 @@
 //! Non-interactive output: `--once` (pretty, gpustat-style), `--json`, `--diagnose`.
 
+use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
+
+use serde::Serialize;
 
 use crate::brand::{APP_NAME, APP_VERSION};
 use crate::fmt;
-use crate::model::{PidMapping, Snapshot, SystemInfo};
+use crate::model::{PidMapping, ProcRow, Snapshot, SpillLevel, SystemInfo};
+
+/// Bump whenever a JSON field changes name or meaning.
+pub const SCHEMA: u32 = 2;
+
+/// The JSON document emitted by `--json` and served at `/json`.
+#[derive(Serialize)]
+pub struct JsonOut<'a> {
+    pub schema: u32,
+    pub tool: String,
+    pub system: &'a SystemInfo,
+    pub snapshot: &'a Snapshot,
+}
+
+impl<'a> JsonOut<'a> {
+    pub fn new(system: &'a SystemInfo, snapshot: &'a Snapshot) -> Self {
+        JsonOut { schema: SCHEMA, tool: format!("{APP_NAME} {APP_VERSION}"), system, snapshot }
+    }
+}
 
 struct Ansi(bool);
 impl Ansi {
@@ -31,7 +52,7 @@ fn bar(frac: f64, width: usize) -> String {
     let mut s = "█".repeat(full);
     if full < width {
         s.push_str(PART[rem]);
-        s.push_str(&" ".repeat(width - full - if rem > 0 { 1 } else { 0 }));
+        s.push_str(&" ".repeat(width - full - usize::from(rem > 0)));
     }
     s
 }
@@ -40,43 +61,56 @@ pub fn once(info: &SystemInfo, snap: &Snapshot, color: bool) {
     let a = Ansi(color && std::io::stdout().is_terminal());
     let mut out = String::new();
     let b = info.backends.first();
-    out += &format!(
-        "{}  {}  {}{}\n",
+    let _ = writeln!(
+        out,
+        "{}  {}  {}{}",
         a.c("1;36", &info.host.hostname),
-        a.c("2", chrono_now()),
+        a.c("2", chrono::Local::now().format("%H:%M:%S")),
         b.and_then(|b| b.driver_version.as_ref()).map(|d| format!("driver {d}")).unwrap_or_default(),
-        b.and_then(|b| b.runtime_version.as_ref()).map(|c| format!("  CUDA {c}")).unwrap_or_default(),
+        b.and_then(|b| Some(format!("  {} {}", b.runtime_name.as_deref()?, b.runtime_version.as_deref()?))).unwrap_or_default(),
     );
     for w in &info.warnings {
-        out += &format!("{} {w}\n", a.c("33", "!"));
+        let _ = writeln!(out, "{} {w}", a.c("33", "!"));
     }
     for (g, s) in info.gpus.iter().zip(&snap.gpus) {
         let util = s.util_gpu.unwrap_or(0.0) as f64 / 100.0;
         let mem = s.mem_frac().unwrap_or(0.0);
         let temp = s.temp.map(|t| a.heat(t as f64 / 90.0, format!("{t:>3}°C"))).unwrap_or_else(|| "  N/A".into());
         let power = match (s.power, s.power_limit) {
-            (Some(p), Some(l)) => a.heat(p / l, format!("{:>4.0}/{:.0}W", p, l)),
+            (Some(p), Some(l)) => a.heat(p / l, format!("{p:>4.0}/{l:.0}W")),
             (Some(p), None) => format!("{p:>4.0}W"),
             _ => "N/A".into(),
         };
-        out += &format!(
-            "{} {:<24} {}  {} {}  {} {} {}  {}\n",
+        let mem_text = format!(
+            "{:>9} / {:<9}",
+            s.mem_used.map(fmt::bytes).unwrap_or_else(|| "N/A".into()),
+            s.mem_total.map(fmt::bytes).unwrap_or_else(|| "N/A".into())
+        );
+        let _ = writeln!(
+            out,
+            "{} {:<24} {}  {} {}  {} {} {}  {}",
             a.c("1;34", format!("[{}]", g.index)),
-            truncate(g.short_name(), 24),
+            fmt::truncate(g.short_name(), 24),
             temp,
             a.heat(util, format!("{:>3.0}%", util * 100.0)),
             a.heat(util, bar(util, 10)),
-            a.c("1;35", format!(
-                "{:>9} / {:<9}",
-                s.mem_used.map(fmt::bytes).unwrap_or_else(|| "N/A".into()),
-                s.mem_total.map(fmt::bytes).unwrap_or_else(|| "N/A".into())
-            )),
+            a.c("1;35", mem_text),
             a.c("35", bar(mem, 10)),
             power,
             procs_inline(snap, g.index, &a),
         );
+        match s.spill.level {
+            SpillLevel::Spilling => {
+                let slow = s.spill.slowdown.map(|x| format!(", ≈{x:.0}× slower")).unwrap_or_default();
+                let _ = writeln!(out, "    {} {}{slow}", a.c("1;31", "SPILL"), s.spill.reason);
+            }
+            SpillLevel::Pressure => {
+                let _ = writeln!(out, "    {} {}", a.c("1;33", "pressure"), s.spill.reason);
+            }
+            SpillLevel::None => {}
+        }
         if let Some(e) = &s.error {
-            out += &format!("    {}\n", a.c("1;31", e));
+            let _ = writeln!(out, "    {}", a.c("1;31", e));
         }
     }
     let _ = std::io::stdout().write_all(out.as_bytes());
@@ -84,23 +118,22 @@ pub fn once(info: &SystemInfo, snap: &Snapshot, color: bool) {
 
 fn procs_inline(snap: &Snapshot, gpu: usize, a: &Ansi) -> String {
     const MAX: usize = 5;
-    let mut ps: Vec<_> = snap.processes.iter().filter(|p| p.gpu == gpu).collect();
-    ps.sort_by(|x, y| {
-        (y.gpu_mem, y.sm_util.map(|v| (v * 100.0) as u64)).cmp(&(x.gpu_mem, x.sm_util.map(|v| (v * 100.0) as u64)))
-    });
+    let mut ps: Vec<&ProcRow> = snap.processes.iter().filter(|p| p.gpu == gpu).collect();
+    ps.sort_by_key(|p| std::cmp::Reverse((p.usage.gpu_mem, p.usage.sm_util.map(|v| (v * 100.0) as u64))));
     let more = ps.len().saturating_sub(MAX);
     let mut s = ps
         .into_iter()
         .take(MAX)
         .map(|p| {
-            let name = p.name.split(['/', '\\']).next_back().unwrap_or(&p.name);
+            let name = p.name.rsplit(['/', '\\']).next().unwrap_or(&p.name);
             let who = p.user.as_deref().map(|u| format!("{u}:")).unwrap_or_default();
-            let usage = match (p.gpu_mem, p.sm_util) {
+            let usage = match (p.usage.gpu_mem, p.usage.sm_util) {
                 (Some(m), _) => fmt::bytes_short(m),
                 (None, Some(u)) => format!("{u:.0}%"),
                 _ => "?".into(),
             };
-            format!("{}{}/{}({usage})", a.c("2", who), a.c("36", name), p.pid)
+            let spill = if p.spilling { a.c("1;31", "!") } else { String::new() };
+            format!("{}{}/{}({usage}){spill}", a.c("2", who), a.c("36", name), p.pid())
         })
         .collect::<Vec<_>>()
         .join(" ");
@@ -110,24 +143,8 @@ fn procs_inline(snap: &Snapshot, gpu: usize, a: &Ansi) -> String {
     s
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).collect::<String>() + "…" }
-}
-
-fn chrono_now() -> String {
-    chrono::Local::now().format("%H:%M:%S").to_string()
-}
-
-#[derive(serde::Serialize)]
-struct JsonOut<'a> {
-    schema: u32,
-    tool: String,
-    system: &'a SystemInfo,
-    snapshot: &'a Snapshot,
-}
-
 pub fn json(info: &SystemInfo, snap: &Snapshot, pretty: bool) {
-    let o = JsonOut { schema: 1, tool: format!("{APP_NAME} {APP_VERSION}"), system: info, snapshot: snap };
+    let o = JsonOut::new(info, snap);
     let s = if pretty { serde_json::to_string_pretty(&o) } else { serde_json::to_string(&o) };
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{}", s.unwrap_or_default());
@@ -147,11 +164,12 @@ pub fn diagnose(info: &SystemInfo, snap: &Snapshot) {
     }
     for b in &info.backends {
         println!(
-            "  backend:    {} lib={} driver={} api={} runtime={}",
+            "  backend:    {} lib={} driver={} api={} runtime={} {}",
             b.name,
             b.library.as_deref().unwrap_or("-"),
             b.driver_version.as_deref().unwrap_or("-"),
             b.api_version.as_deref().unwrap_or("-"),
+            b.runtime_name.as_deref().unwrap_or(""),
             b.runtime_version.as_deref().unwrap_or("-")
         );
     }
@@ -163,15 +181,15 @@ pub fn diagnose(info: &SystemInfo, snap: &Snapshot) {
             "  gpu {}:      {} [{}] bus={} uuid={}",
             g.index,
             g.name,
-            g.architecture.as_deref().unwrap_or("?"),
+            g.architecture.as_deref().or(g.chip.as_deref()).unwrap_or("?"),
             g.pci_bus_id.as_deref().unwrap_or("?"),
             g.uuid.as_deref().unwrap_or("?")
         );
         if let Some(s) = snap.gpus.get(g.index) {
-            let mut missing = Vec::new();
-            let checks: [(&str, bool); 9] = [
+            let checks = [
                 ("util", s.util_gpu.is_some()),
                 ("memory", s.mem_used.is_some()),
+                ("shared-mem", s.mem_shared.is_some()),
                 ("temp", s.temp.is_some()),
                 ("fan", !s.fans.is_empty()),
                 ("power", s.power.is_some()),
@@ -179,13 +197,11 @@ pub fn diagnose(info: &SystemInfo, snap: &Snapshot) {
                 ("pcie", s.pcie_rx.is_some()),
                 ("encdec", s.enc_util.is_some()),
                 ("ecc", s.ecc_corrected.is_some()),
+                ("bandwidth", g.memory_bandwidth.is_some()),
             ];
-            for (n, ok) in checks {
-                if !ok {
-                    missing.push(n);
-                }
-            }
+            let missing: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
             println!("              unavailable: {}", if missing.is_empty() { "-".into() } else { missing.join(", ") });
+            println!("              spill: {:?} {}", s.spill.level, s.spill.reason);
         }
     }
     println!("  processes:  {}", snap.processes.len());
@@ -197,13 +213,15 @@ pub fn diagnose(info: &SystemInfo, snap: &Snapshot) {
             PidMapping::External => "external",
         };
         println!(
-            "    gpu{} pid={} local={} [{m}] mem={} sm={} {}",
+            "    gpu{} pid={} local={} [{m}] mem={} shared={}{} sm={} {}",
             p.gpu,
-            p.pid,
+            p.pid(),
             p.local_pid.map(|l| l.to_string()).unwrap_or_else(|| "-".into()),
-            p.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into()),
-            fmt::opt(p.sm_util, "%"),
-            p.cmdline
+            p.usage.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into()),
+            p.usage.gpu_mem_shared.map(fmt::bytes).unwrap_or_else(|| "N/A".into()),
+            if p.spilling { " SPILL" } else { "" },
+            fmt::pct(p.usage.sm_util),
+            fmt::truncate(&p.cmdline, 100)
         );
     }
 }

@@ -175,6 +175,7 @@ nvml_api! {
     compute_mode: DevU = "nvmlDeviceGetComputeMode";
     mig_mode: unsafe extern "C" fn(nvmlDevice_t, *mut c_uint, *mut c_uint) -> nvmlReturn_t = "nvmlDeviceGetMigMode";
     num_fans: DevU = "nvmlDeviceGetNumFans";
+    memory_bus_width: DevU = "nvmlDeviceGetMemoryBusWidth";
 
     memory_v1: unsafe extern "C" fn(nvmlDevice_t, *mut nvmlMemory_t) -> nvmlReturn_t = "nvmlDeviceGetMemoryInfo";
     memory_v2: unsafe extern "C" fn(nvmlDevice_t, *mut nvmlMemory_v2_t) -> nvmlReturn_t = "nvmlDeviceGetMemoryInfo_v2";
@@ -299,11 +300,7 @@ impl Api {
                 }
             }
         }
-        Err(if errs.is_empty() {
-            "NVIDIA driver library (NVML) not found".into()
-        } else {
-            errs.join("; ")
-        })
+        Err(if errs.is_empty() { "NVIDIA driver library (NVML) not found".into() } else { errs.join("; ") })
     }
 
     pub fn err_str(&self, code: nvmlReturn_t) -> String {
