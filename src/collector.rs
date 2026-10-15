@@ -16,6 +16,10 @@ pub struct Collector {
     /// Global index of each backend's first GPU.
     offsets: Vec<usize>,
     host: Host,
+    #[cfg(windows)]
+    pdh: Option<(crate::winpdh::Pdh, Vec<Option<crate::winpdh::Luid>>)>,
+    #[cfg(windows)]
+    mem_totals: Vec<Option<u64>>,
 }
 
 impl Collector {
@@ -37,7 +41,31 @@ impl Collector {
         if info.host.wsl && info.gpus.iter().any(|g| g.vendor != crate::model::Vendor::Demo) {
             info.warnings.push("WSL: the driver doesn't expose per-process GPU data here".into());
         }
-        (Collector { backends: d.backends, offsets, host }, info)
+        #[cfg(windows)]
+        let pdh = crate::winpdh::Pdh::new().map(|p| {
+            // Match each GPU to its WDDM adapter by PCI location.
+            let luids = info
+                .gpus
+                .iter()
+                .map(|g| {
+                    let loc = g.pci_bus_id.as_deref().and_then(crate::winpdh::parse_bus_id)?;
+                    p.adapters.iter().find(|(_, a)| **a == loc).map(|(l, _)| *l)
+                })
+                .collect();
+            (p, luids)
+        });
+        (
+            Collector {
+                backends: d.backends,
+                offsets,
+                host,
+                #[cfg(windows)]
+                pdh,
+                #[cfg(windows)]
+                mem_totals: info.gpus.iter().map(|g| g.memory_total).collect(),
+            },
+            info,
+        )
     }
 
     pub fn collect(&mut self) -> Snapshot {
@@ -50,6 +78,10 @@ impl Collector {
                 }
                 gpus.push(s);
             }
+        }
+        #[cfg(windows)]
+        if let Some((pdh, luids)) = &mut self.pdh {
+            merge_pdh(pdh.sample(), luids, &self.mem_totals, &mut procs);
         }
         // Keep processes on the sample too (for JSON consumers), but the
         // joined table is what the UI uses.
@@ -75,6 +107,52 @@ impl Collector {
             gpus,
             processes: rows,
         }
+    }
+}
+
+/// Fill in what NVML can't report under WDDM (per-process memory and
+/// utilization) and add GPU processes it didn't list.
+#[cfg(windows)]
+fn merge_pdh(
+    usage: std::collections::HashMap<(crate::winpdh::Luid, u32), crate::winpdh::ProcUsage>,
+    luids: &[Option<crate::winpdh::Luid>],
+    totals: &[Option<u64>],
+    procs: &mut Vec<(usize, crate::model::GpuProcess)>,
+) {
+    use crate::model::{GpuProcess, ProcKind};
+    // The counters occasionally report garbage (terabytes); drop anything
+    // larger than the card.
+    let sane = |gpu: usize, v: Option<u64>| v.filter(|&b| totals.get(gpu).copied().flatten().is_none_or(|t| b <= t));
+    let mut seen = std::collections::HashSet::new();
+    for (gpu, p) in procs.iter_mut() {
+        let Some(Some(luid)) = luids.get(*gpu) else { continue };
+        seen.insert((*gpu, p.pid));
+        if let Some(u) = usage.get(&(*luid, p.pid)) {
+            p.gpu_mem = p.gpu_mem.or(sane(*gpu, u.dedicated));
+            p.sm_util = p.sm_util.or(u.util);
+            p.enc_util = p.enc_util.or(u.enc);
+            p.dec_util = p.dec_util.or(u.dec);
+        }
+    }
+    for ((luid, pid), u) in usage {
+        let Some(gpu) = luids.iter().position(|l| *l == Some(luid)) else { continue };
+        if seen.contains(&(gpu, pid)) || (u.dedicated.unwrap_or(0) == 0 && u.util.unwrap_or(0.0) <= 0.0) {
+            continue;
+        }
+        procs.push((
+            gpu,
+            GpuProcess {
+                pid,
+                kind: ProcKind::Graphics,
+                gpu_mem: sane(gpu, u.dedicated),
+                sm_util: u.util,
+                mem_util: None,
+                enc_util: u.enc,
+                dec_util: u.dec,
+                gpu_instance: None,
+                name: None,
+            },
+        ));
     }
 }
 

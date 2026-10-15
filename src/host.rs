@@ -136,7 +136,12 @@ impl Host {
                                 .clone()
                         });
                         let name = o.name().to_string_lossy().into_owned();
-                        let cmdline = if cmd.is_empty() { name.clone() } else { cmd.join(" ") };
+                        let mut cmdline = if cmd.is_empty() { name.clone() } else { cmd.join(" ") };
+                        if name.eq_ignore_ascii_case("vmwp.exe") {
+                            // GPU work done inside WSL2 / Docker Desktop / Hyper-V VMs is
+                            // attributed to the VM worker process on the Windows side.
+                            cmdline = format!("{name}  [WSL2 / Hyper-V VM: GPU work from inside the VM]");
+                        }
                         (name, cmdline, user, Some(o.cpu_usage()), Some(o.memory()), Some(o.run_time()))
                     }
                     None => {

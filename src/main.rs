@@ -7,6 +7,8 @@ mod model;
 mod pidmap;
 mod report;
 mod ui;
+#[cfg(windows)]
+mod winpdh;
 
 use std::time::Duration;
 
