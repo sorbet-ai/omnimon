@@ -23,7 +23,7 @@ use clap::Parser;
 use collector::Collector;
 
 #[derive(Parser, Debug)]
-#[command(name = brand::APP_NAME, version, about = "Terminal GPU monitor. Single binary; works on bare metal, in containers, WSL and Windows.")]
+#[command(name = brand::APP_NAME, version, about = "Terminal monitor for GPUs, their processes and the host. Linux, Windows and macOS; works in containers and WSL.")]
 struct Cli {
     /// Refresh interval in seconds [default: 1, or the last value used].
     #[arg(short, long)]

@@ -108,6 +108,9 @@ real hardware during development.
 
 ## Windows, any vendor (`src/backend/wddm.rs` + `src/os/windows.rs`)
 
+`OMNIMON_WDDM_ALL=1` also lists adapters that a richer backend (NVML)
+already covers, for comparing the two.
+
 - `\GPU Engine(*)\Utilization Percentage`, instance
   `pid_<pid>_luid_0x<hi>_0x<lo>_phys_<n>_eng_<m>_engtype_<type>`; per process =
   max over engines (Task Manager's rule).

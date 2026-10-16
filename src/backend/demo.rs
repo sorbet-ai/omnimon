@@ -3,7 +3,9 @@
 use std::time::Instant;
 
 use super::Backend;
-use crate::model::{Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, MigInstance, NvLink, PidScope, ProcKind, Throttle, Vendor};
+use crate::model::{
+    Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, HostSample, MigInstance, NvLink, PidScope, ProcKind, Snapshot, Throttle, Vendor,
+};
 
 const GIB: u64 = 1 << 30;
 
@@ -264,5 +266,41 @@ impl Backend for Demo {
             });
         }
         out
+    }
+}
+
+/// Cores of the simulated host.
+pub const HOST_CORES: usize = 64;
+
+/// Replace this machine's host data in a demo snapshot with a simulated
+/// training node (busy data loaders, lots of RAM, no swap), and give the
+/// simulated processes users, CPU, memory and run times.
+pub fn dress(s: &mut Snapshot) {
+    let t = s.timestamp;
+    let wave = |period: f64, phase: f64| 0.5 + 0.5 * (t / period + phase).sin();
+    let per_core: Vec<f32> = (0..HOST_CORES).map(|c| (25.0 + 55.0 * wave(5.0 + (c % 7) as f64, c as f64)) as f32).collect();
+    let cpu = per_core.iter().sum::<f32>() / per_core.len() as f32;
+    s.host = HostSample {
+        cpu,
+        per_core,
+        mem_used: ((180.0 + 40.0 * wave(60.0, 0.0)) * GIB as f64) as u64,
+        mem_total: 512 * GIB,
+        swap_used: 0,
+        swap_total: 0,
+        load: Some([cpu as f64 * 0.64, cpu as f64 * 0.6, cpu as f64 * 0.55]),
+        uptime: 12 * 86400 + 3 * 3600 + t as u64 % 3600,
+        net_rx: Some((800e6 * wave(9.0, 1.0)) as u64),
+        net_tx: Some((120e6 * wave(7.0, 2.0)) as u64),
+        disk_read: Some((1.5e9 * wave(11.0, 0.5)) as u64),
+        disk_write: Some((40e6 * wave(13.0, 3.0)) as u64),
+        cpu_temp: Some(58.0 + 8.0 * wave(30.0, 0.0) as f32),
+    };
+    const USERS: [&str; 3] = ["alice", "bob", "ci"];
+    for (k, p) in s.processes.iter_mut().enumerate() {
+        let pid = p.usage.pid as u64;
+        p.user = Some(USERS[k % USERS.len()].into());
+        p.cpu = Some(90.0 + (pid % 7) as f32 * 45.0);
+        p.rss = Some((8 + pid % 40) * GIB);
+        p.runtime = Some(3600 * (1 + pid % 30) + t as u64 % 3600);
     }
 }

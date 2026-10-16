@@ -26,7 +26,8 @@ pub(super) fn draw(f: &mut Frame, app: &App) -> Hit {
     if let Some((msg, _, err)) = &app.toast {
         let t = app.theme();
         let w = (msg.chars().count() as u16 + 4).min(area.width);
-        let r = Rect { x: area.x + area.width - w, y: footer.y.saturating_sub(1), width: w, height: 1 };
+        // In the footer row: anything above it may be under a chart image.
+        let r = Rect { x: area.x + area.width - w, y: footer.y, width: w, height: 1 };
         f.render_widget(Clear, r);
         let bg = if *err { t.crit } else { t.ok };
         f.render_widget(Paragraph::new(format!("  {msg}  ")).style(Style::new().fg(Color::Black).bg(bg).bold()), r);

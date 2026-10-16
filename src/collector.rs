@@ -24,6 +24,8 @@ pub struct Collector {
     enricher: ProcEnricher,
     pub thresholds: spill::Thresholds,
     prev: Option<Snapshot>,
+    /// Only simulated GPUs: the host is simulated too.
+    demo: bool,
 }
 
 impl Collector {
@@ -46,6 +48,15 @@ impl Collector {
         if info.gpus.is_empty() {
             info.warnings.push("no GPUs found".into());
         }
+        // A demo shows a made-up machine, not this one (demos end up in
+        // screenshots and bug reports).
+        if !info.gpus.is_empty() && info.gpus.iter().all(|g| g.vendor == Vendor::Demo) {
+            info.host.hostname = "gpu-node-01".into();
+            info.host.cpu_brand = "Demo CPU".into();
+            info.host.cpu_cores = crate::backend::demo::HOST_CORES;
+            info.host.container = None;
+            info.host.wsl = false;
+        }
         if info.host.wsl && info.gpus.iter().any(|g| g.vendor != Vendor::Demo) {
             info.warnings.push("WSL: the driver doesn't expose per-process GPU data here".into());
         }
@@ -59,6 +70,7 @@ impl Collector {
             enricher,
             thresholds: spill::Thresholds::default(),
             prev: None,
+            demo: !info.gpus.is_empty() && info.gpus.iter().all(|g| g.vendor == Vendor::Demo),
         };
         (c, info)
     }
@@ -107,6 +119,9 @@ impl Collector {
             processes: rows,
             events: Vec::new(),
         };
+        if self.demo {
+            crate::backend::demo::dress(&mut snap);
+        }
         if let Some(prev) = &self.prev {
             snap.events = crate::events::diff(prev, &snap);
         }

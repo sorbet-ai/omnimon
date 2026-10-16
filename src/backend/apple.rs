@@ -213,9 +213,7 @@ impl Thermal {
             for svc in as_array(services.0) {
                 let name = Cf(IOHIDServiceClientCopyProperty(svc, key.0 as CFStringRef));
                 let name = as_string(name.0).unwrap_or_default();
-                if crate::brand::env("APPLE_SENSORS").is_some() {
-                    eprintln!("sensor: {name}");
-                }
+                log::trace!("HID sensor: {name}");
                 let lower = name.to_lowercase();
                 if lower.contains("gpu") {
                     gpu.push(svc);

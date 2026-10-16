@@ -1,3 +1,6 @@
 /target
 /dist
-dist/old/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

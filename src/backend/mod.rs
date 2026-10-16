@@ -1,8 +1,7 @@
 //! GPU backends. Each vendor implements [`Backend`]; [`detect`] loads every
 //! backend that works on this machine and they're shown side by side.
 //!
-//! Adding a vendor (AMD sysfs/fdinfo, Apple IOReport, Intel, Windows PDH...)
-//! means adding a module here and a line in `detect`.
+//! Adding a vendor means adding a module here and a line in `detect`.
 
 #[cfg(target_os = "linux")]
 pub mod amd;

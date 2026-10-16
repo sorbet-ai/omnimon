@@ -24,12 +24,15 @@ pub struct Config {
     /// preserved across saves.
     pub keys: std::collections::HashMap<crate::ui::Action, Vec<String>>,
     /// Shell command run on notable events; the event is in <APP>_EVENT,
-    /// <APP>_SEVERITY, <APP>_GPU, <APP>_TIME. Hand-edited.
+    /// <APP>_KIND, <APP>_SEVERITY, <APP>_GPU, <APP>_PID, <APP>_TIME.
     pub alert_command: Option<String>,
     /// Lowest severity that triggers it: "info", "warn" or "crit" (default).
     pub alert_min: Option<crate::events::Severity>,
     /// Electricity price for cost estimates (any currency per kWh).
     pub price_per_kwh: Option<f64>,
+    /// Write samples to the state directory for rewind across restarts
+    /// (default true).
+    pub record_history: Option<bool>,
     /// Keys this version doesn't know (from a newer one, or notes): kept on save.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,

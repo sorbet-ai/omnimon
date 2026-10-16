@@ -38,7 +38,7 @@ pub(super) fn help(f: &mut Frame, app: &App) {
     lines.push(legend("SYS-MEM", "!1.2G", t.crit, "GPU memory spilled into system RAM"));
     lines.push(Line::default());
     let charts =
-        if app.chart_ctx().pixels() { format!("pixels ({})", app.gfx.protocol_name()) } else { app.chart_style.label().to_string() };
+        if app.popup_chart_ctx().pixels() { format!("pixels ({})", app.gfx.protocol_name()) } else { app.chart_style.label().to_string() };
     let colors = if app.truecolor { "truecolor" } else { "256 colors" };
     lines.push(Line::from(s(format!("{APP_NAME} {APP_VERSION} · theme {} · {colors} · charts {charts}", t.name), t.faint)).centered());
     let r = centered(f.area(), 84, lines.len() as u16 + 2);
@@ -215,7 +215,7 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     }
     let chart = Rect { y: top, height: bottom - top, ..inner };
     let [c1, c2] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(2).areas(chart);
-    let ctx = app.chart_ctx();
+    let ctx = app.popup_chart_ctx();
     let mem = app.store.hist.tail(&h.mem, ctx.samples(c1.width));
     let peak = mem.iter().flatten().copied().fold(0.0f64, f64::max);
     let scale = app.sample(p.gpu).and_then(|g| g.mem_total).map(|v| v as f64).unwrap_or(peak).max(1.0);

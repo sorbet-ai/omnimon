@@ -248,7 +248,19 @@ impl App {
         self.store.hist.power_frac(i, s, self.gpu(i)?.power_limit_max)
     }
 
+    /// Charts in the main view. Terminal images sit on top of text, so
+    /// while a popup is open they fall back to block charts; otherwise each
+    /// refresh would paint over the popup.
     fn chart_ctx(&self) -> gfx::ChartCtx<'_> {
+        let mut ctx = self.popup_chart_ctx();
+        if self.popup.is_some() && ctx.style == ChartStyle::Pixels {
+            ctx.style = ChartStyle::Blocks;
+        }
+        ctx
+    }
+
+    /// Charts inside a popup (drawn last, so images are fine there).
+    fn popup_chart_ctx(&self) -> gfx::ChartCtx<'_> {
         let bg = match self.gfx.bg {
             Some((r, g, b)) => ratatui::style::Color::Rgb(r, g, b),
             None => ratatui::style::Color::Rgb(0x1a, 0x1b, 0x26),
@@ -746,7 +758,7 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
         forced => gfx::Gfx::detect(Some(forced)),
     };
     let mut app = App::new(info, interval, opts, &cfg, gfx);
-    let record = !app.info.gpus.iter().all(|g| g.vendor == crate::model::Vendor::Demo);
+    let record = cfg.record_history != Some(false) && !app.info.gpus.iter().all(|g| g.vendor == crate::model::Vendor::Demo);
     app.store = store::Store::open(&app.info, interval.as_secs_f64(), record);
     app.refresh_view();
     if app.chart_ctx().pixels() {
@@ -809,7 +821,7 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
                         break;
                     }
                 }
-                if app.chart_ctx().pixels() && before != (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu) {
+                if app.popup_chart_ctx().pixels() && before != (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu) {
                     app.gfx.invalidate();
                     terminal.clear()?;
                 }

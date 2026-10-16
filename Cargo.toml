@@ -1,17 +1,16 @@
 [package]
-# The app name lives HERE and only here. Binary name, window title, env-var
-# prefix (OMNIMON_*), config dir, etc. are all derived from CARGO_PKG_NAME.
-# To rename the app: change `name` below (and the README). That's it.
+# Binary name, window title, env-var prefix (OMNIMON_*), config dir and
+# metric namespace are all derived from `name` (see src/brand.rs).
 name = "omnimon"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "One terminal monitor for every GPU (NVIDIA, Apple, AMD, Intel), the processes using them and the machine around them. Single binary; works in containers, WSL and Windows."
+description = "Terminal monitor for GPUs (NVIDIA, Apple, AMD, Intel), the processes using them and the machine around them. One binary for Linux, Windows and macOS; works in containers and WSL."
 license = "MIT"
 repository = "https://github.com/sorbet-ai/omnimon"
 homepage = "https://github.com/sorbet-ai/omnimon"
 readme = "README.md"
-keywords = ["gpu", "monitor", "nvidia", "tui", "nvtop"]
+keywords = ["gpu", "monitor", "nvidia", "tui", "nvml"]
 categories = ["command-line-utilities", "hardware-support"]
 # Keep the published crate to what builds and tests it.
 include = ["src/**/*", "tests/fixtures/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "rustfmt.toml"]

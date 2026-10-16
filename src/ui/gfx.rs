@@ -468,6 +468,32 @@ mod tests {
     use crate::ui::theme::THEMES;
 
     /// Renders sample charts (to the temp dir) for eyeballing.
+    /// Regenerates docs/img/pixel-chart.png (run by scripts/screenshots.sh).
+    #[test]
+    #[ignore]
+    fn pixel_chart_screenshot() {
+        let t = &THEMES[0];
+        // A training run: busy with periodic evaluation dips; memory climbs
+        // to a plateau after warm-up.
+        let util: Vec<Option<f64>> = (0..240)
+            .map(|i| {
+                let x = i as f64;
+                let base = if (i % 60) > 52 { 0.18 } else { 0.86 + 0.06 * (x / 5.0).sin() };
+                Some((base + 0.03 * (x * 1.7).sin()).clamp(0.0, 1.0))
+            })
+            .collect();
+        let mem: Vec<Option<f64>> = (0..240).map(|i| Some((0.25 + 0.5 * (1.0 - (-(i as f64) / 25.0).exp())).min(0.78))).collect();
+        let bg = Color::Rgb(26, 27, 38);
+        let img = render(
+            1400,
+            360,
+            1.4,
+            &[Series { data: &util, grad: t.util, down: false }, Series { data: &mem, grad: t.mem, down: true }],
+            bg,
+        );
+        img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/img/pixel-chart.png")).unwrap();
+    }
+
     #[test]
     fn renders_sample_charts() {
         let t = &THEMES[0];
