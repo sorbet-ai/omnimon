@@ -21,6 +21,13 @@ pub struct Config {
     /// Key overrides per action, e.g. {"kill": ["K", "f9"]}. Hand-edited;
     /// preserved across saves.
     pub keys: std::collections::HashMap<crate::ui::Action, Vec<String>>,
+    /// Shell command run on notable events; the event is in <APP>_EVENT,
+    /// <APP>_SEVERITY, <APP>_GPU, <APP>_TIME. Hand-edited.
+    pub alert_command: Option<String>,
+    /// Lowest severity that triggers it: "info", "warn" or "crit" (default).
+    pub alert_min: Option<crate::events::Severity>,
+    /// Electricity price for cost estimates (any currency per kWh).
+    pub price_per_kwh: Option<f64>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -61,10 +68,15 @@ pub fn load() -> Config {
 /// Best effort; a read-only home (containers) is fine. Hand-edited key
 /// bindings already on disk are kept.
 pub fn save(c: &Config) {
+    // Keep hand-edited settings the UI doesn't manage.
     let mut c = c.clone();
+    let disk = load();
     if c.keys.is_empty() {
-        c.keys = load().keys;
+        c.keys = disk.keys;
     }
+    c.alert_command = c.alert_command.or(disk.alert_command);
+    c.alert_min = c.alert_min.or(disk.alert_min);
+    c.price_per_kwh = c.price_per_kwh.or(disk.price_per_kwh);
     let c = &c;
     let Some(p) = path() else { return };
     if let Some(dir) = p.parent() {

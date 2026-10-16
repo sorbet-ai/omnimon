@@ -36,6 +36,8 @@ pub struct GpuHist {
     pub tx: Ring,
     /// Highest power seen; the bar scale for GPUs without a power limit (Apple).
     pub peak_power: f64,
+    /// Joules since this session started (integrated power).
+    pub energy: f64,
 }
 
 #[derive(Default)]
@@ -43,6 +45,8 @@ pub struct ProcHist {
     /// Bytes.
     pub mem: Ring,
     pub sm: Ring,
+    /// Estimated joules: GPU power x this process's share of SM activity.
+    pub energy: f64,
     seen: bool,
 }
 
@@ -74,7 +78,25 @@ impl History {
                 r.push(None);
             }
         }
+        let dt = self.last_time.map(|t| s.timestamp - t).filter(|d| *d > 0.0 && *d <= 10.0);
         self.last_time = Some(s.timestamp);
+        if let Some(dt) = dt {
+            for (h, g) in self.gpus.iter_mut().zip(&s.gpus) {
+                h.energy += g.power.unwrap_or(0.0) * dt;
+            }
+            for (i, g) in s.gpus.iter().enumerate() {
+                let Some(p) = g.power else { continue };
+                let on: Vec<_> = s.processes.iter().filter(|q| q.gpu == i).collect();
+                let total: f64 = on.iter().filter_map(|q| q.usage.sm_util).map(f64::from).sum();
+                if total <= 0.0 {
+                    continue;
+                }
+                for q in on {
+                    let share = q.usage.sm_util.unwrap_or(0.0) as f64 / total;
+                    self.procs.entry(q.key()).or_default().energy += p * dt * share;
+                }
+            }
+        }
         for ((h, g), gi) in self.gpus.iter_mut().zip(&s.gpus).zip(&info.gpus) {
             h.util.push(g.util_gpu.map(|v| v as f64 / 100.0));
             h.mem.push(g.mem_frac());

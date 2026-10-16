@@ -113,6 +113,7 @@ mod tests {
             rss: None,
             runtime: None,
             spilling: false,
+            container: None,
         }
     }
 

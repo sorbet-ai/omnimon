@@ -257,6 +257,8 @@ struct App {
     /// Command line being typed after `:`.
     cmd_edit: Option<String>,
     hidden: HashSet<Panel>,
+    alerts: crate::alerts::Alerts,
+    price_per_kwh: Option<f64>,
     quit: bool,
 }
 
@@ -304,6 +306,8 @@ impl App {
             keymap: input::Keymap::new(&cfg.keys),
             cmd_edit: None,
             hidden: cfg.hidden.iter().filter_map(|h| Panel::parse(h)).collect(),
+            alerts: crate::alerts::Alerts::new(cfg.alert_command.clone(), cfg.alert_min),
+            price_per_kwh: cfg.price_per_kwh,
             quit: false,
         }
     }
@@ -371,6 +375,7 @@ impl App {
             self.past.pop_front();
         }
         self.hist.push(&self.info, &s);
+        self.alerts.handle(&s.events);
         self.events.extend(s.events.iter().cloned());
         while self.events.len() > 2000 {
             self.events.pop_front();
@@ -868,6 +873,9 @@ impl App {
             chart_style: self.saved_chart_style,
             hidden: self.hidden.iter().map(|p| p.name().to_string()).collect(),
             keys: Default::default(),
+            alert_command: None,
+            alert_min: None,
+            price_per_kwh: None,
         });
     }
 }
@@ -977,6 +985,7 @@ mod tests {
             rss: None,
             runtime: None,
             spilling: false,
+            container: None,
         }
     }
 

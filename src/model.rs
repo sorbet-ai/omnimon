@@ -347,6 +347,9 @@ pub struct ProcRow {
     pub runtime: Option<u64>,
     /// This process's allocations are spilling into system memory.
     pub spilling: bool,
+    /// Container runtime and short id ("docker:3f2a1b9c0d12"), when known.
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 impl ProcRow {

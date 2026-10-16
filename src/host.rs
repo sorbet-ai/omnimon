@@ -14,11 +14,60 @@ pub struct Host {
     /// uid -> user name (users rarely change; refreshed on a miss).
     user_names: HashMap<String, Option<String>>,
     mapper: PidResolver,
+    /// pid -> container (a process never changes container).
+    containers: HashMap<u32, Option<String>>,
     networks: Networks,
     disks: Disks,
     components: Components,
     last_io: std::time::Instant,
     pub info: HostInfo,
+}
+
+/// Container runtime and short id from /proc/<pid>/cgroup, e.g.
+/// ".../docker-<64 hex>.scope" -> "docker:<12 hex>". Kubernetes pods add the
+/// pod uid prefix.
+pub fn container_of(cgroup: &str) -> Option<String> {
+    let hex_id = |s: &str| -> Option<String> {
+        let id: String = s.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        (id.len() >= 32).then(|| id[..12].to_string())
+    };
+    let mut pod = None;
+    for line in cgroup.lines() {
+        let path = line.rsplit(':').next().unwrap_or("");
+        for part in path.split('/') {
+            if part.starts_with("kubepods")
+                && let Some(i) = part.rfind("-pod")
+            {
+                let uid = part[i + 4..].trim_end_matches(".slice").replace('_', "-");
+                if uid.len() >= 8 {
+                    pod = Some(uid[..8].to_string());
+                }
+            }
+            for (prefix, runtime) in [
+                ("docker-", "docker"),
+                ("cri-containerd-", "containerd"),
+                ("crio-", "cri-o"),
+                ("libpod-", "podman"),
+                ("containerd-", "containerd"),
+            ] {
+                if let Some(rest) = part.strip_prefix(prefix)
+                    && let Some(id) = hex_id(rest)
+                {
+                    return Some(match pod {
+                        Some(p) => format!("pod {p} · {runtime}:{id}"),
+                        None => format!("{runtime}:{id}"),
+                    });
+                }
+            }
+        }
+        // cgroup v1 style: /docker/<id>
+        if let Some(i) = path.find("/docker/")
+            && let Some(id) = hex_id(&path[i + 8..])
+        {
+            return Some(format!("docker:{id}"));
+        }
+    }
+    None
 }
 
 fn is_loopback(name: &str) -> bool {
@@ -86,6 +135,7 @@ impl Host {
             users: Users::new_with_refreshed_list(),
             user_names: HashMap::new(),
             mapper: PidResolver::new(in_container),
+            containers: HashMap::new(),
             networks: Networks::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             components: Components::new_with_refreshed_list(),
@@ -215,7 +265,13 @@ impl Host {
                         (n.clone(), n, None, None, None, None)
                     }
                 };
-                ProcRow { gpu, usage, local_pid, mapping, name, cmdline, user, cpu, rss, runtime, spilling: false }
+                let container = local_pid.and_then(|l| {
+                    self.containers
+                        .entry(l)
+                        .or_insert_with(|| std::fs::read_to_string(format!("/proc/{l}/cgroup")).ok().and_then(|t| container_of(&t)))
+                        .clone()
+                });
+                ProcRow { gpu, usage, local_pid, mapping, name, cmdline, user, cpu, rss, runtime, spilling: false, container }
             })
             .collect()
     }
@@ -367,6 +423,17 @@ pub fn process_details(pid: u32) -> Option<ProcDetails> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn containers_from_cgroups() {
+        let id = "3f2a1b9c0d12aabbccddeeff00112233445566778899aabbccddeeff00112233";
+        assert_eq!(container_of(&format!("0::/system.slice/docker-{id}.scope\n")).as_deref(), Some("docker:3f2a1b9c0d12"));
+        assert_eq!(container_of(&format!("12:memory:/docker/{id}\n")).as_deref(), Some("docker:3f2a1b9c0d12"));
+        let k8s =
+            format!("0::/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod1a2b3c4d_5e6f.slice/cri-containerd-{id}.scope");
+        assert_eq!(container_of(&k8s).as_deref(), Some("pod 1a2b3c4d · containerd:3f2a1b9c0d12"));
+        assert_eq!(container_of("0::/user.slice/user-1000.slice/session-2.scope\n"), None);
+    }
 
     #[test]
     fn details_of_self() {

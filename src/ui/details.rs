@@ -129,6 +129,10 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
             },
         ),
         ("Energy", o(sm.energy_joules.map(|j| format!("{:.3} kWh since driver load", j / 3.6e6)))),
+        ("This session", {
+            let j = app.hist.gpus.get(i).map(|h| h.energy).unwrap_or(0.0);
+            format!("{:.1} Wh{}", j / 3600.0, app.price_per_kwh.map(|p| format!(" · ≈{:.3} at {p}/kWh", j / 3.6e6 * p)).unwrap_or_default())
+        }),
         ("Performance state", o(sm.pstate.map(|p| format!("P{p}")))),
         (
             "Clocks",

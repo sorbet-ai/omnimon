@@ -90,6 +90,7 @@ mod tests {
             rss: None,
             runtime: None,
             spilling,
+            container: None,
         }
     }
 

@@ -1,3 +1,4 @@
+mod alerts;
 mod backend;
 mod brand;
 mod collector;
@@ -100,7 +101,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(addr) = &cli.serve {
-        return serve::run(collector, info, interval, addr);
+        return serve::run(collector, info, interval, addr, &cfg);
     }
 
     let opts = ui::UiOptions { theme: cli.theme.clone(), readonly: cli.readonly, graphics: cli.graphics.clone() };

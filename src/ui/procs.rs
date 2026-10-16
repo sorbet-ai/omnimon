@@ -152,6 +152,10 @@ fn cell<'a>(col: Col, p: &ProcRow, c: &Ctx) -> Cell<'a> {
                 PidMapping::Guessed => spans.push(s("≈ ", t.warn)),
                 _ => {}
             }
+            if let Some(c) = &p.container {
+                let short = c.rsplit(':').next().unwrap_or(c);
+                spans.push(s(format!("[{}] ", &short[..short.len().min(8)]), t.accent2));
+            }
             spans.push(Span::raw(fmt::truncate(&txt, c.cmd_w as usize)));
             Cell::from(Line::from(spans))
         }

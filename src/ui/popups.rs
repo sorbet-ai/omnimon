@@ -125,6 +125,13 @@ pub(super) fn process(f: &mut Frame, app: &App) {
         ProcKind::Both => "compute + graphics",
     };
     let mut lines = vec![kv("user", p.user.clone().unwrap_or_else(|| "-".into())), kv("type", kind.into()), kv("pid", mapping)];
+    if let Some(c) = &p.container {
+        lines.push(kv("container", c.clone()));
+    }
+    if let Some(h) = app.hist.procs.get(key).filter(|h| h.energy > 0.0) {
+        let cost = app.price_per_kwh.map(|pr| format!(" · ≈{:.3}", h.energy / 3.6e6 * pr)).unwrap_or_default();
+        lines.push(kv("energy", format!("≈{:.1} Wh while watched (share of GPU power by SM use){cost}", h.energy / 3600.0)));
+    }
     lines.push(kv("gpu mem", u.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into())));
     if let Some(sh) = u.gpu_mem_shared {
         lines.push(if p.spilling {
