@@ -189,6 +189,7 @@ nvml_api! {
     enforced_power_limit: DevU = "nvmlDeviceGetEnforcedPowerLimit";
     power_limit_constraints: unsafe extern "C" fn(nvmlDevice_t, *mut c_uint, *mut c_uint) -> nvmlReturn_t = "nvmlDeviceGetPowerManagementLimitConstraints";
     power_default_limit: DevU = "nvmlDeviceGetPowerManagementDefaultLimit";
+    set_power_limit: unsafe extern "C" fn(nvmlDevice_t, c_uint) -> nvmlReturn_t = "nvmlDeviceSetPowerManagementLimit";
     total_energy: unsafe extern "C" fn(nvmlDevice_t, *mut c_ulonglong) -> nvmlReturn_t = "nvmlDeviceGetTotalEnergyConsumption";
     clock_info: DevUU = "nvmlDeviceGetClockInfo";
     max_clock_info: DevUU = "nvmlDeviceGetMaxClockInfo";

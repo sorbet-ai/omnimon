@@ -35,6 +35,7 @@ pub(super) fn draw(f: &mut Frame, app: &App) -> Hit {
         Some(Popup::Help) => super::popups::help(f, app),
         Some(Popup::Kill { .. }) => super::popups::kill(f, app),
         Some(Popup::Process { .. }) => super::popups::process(f, app),
+        Some(Popup::Tune { .. }) => super::popups::tune(f, app),
         None => {}
     }
     hit

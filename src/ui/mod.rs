@@ -192,6 +192,11 @@ enum Popup {
         /// Show the whole environment instead of the GPU-relevant part.
         full_env: bool,
     },
+    /// Adjust the selected GPU's power limit.
+    Tune {
+        gpu: usize,
+        watts: f64,
+    },
     /// (gpu, driver pid, local pid, name) per target.
     Kill {
         targets: Vec<(usize, u32, u32, String)>,
@@ -463,6 +468,10 @@ impl App {
             self.quit = true;
             return;
         }
+        if matches!(self.popup, Some(Popup::Tune { .. })) {
+            self.on_tune_key(k, sampler);
+            return;
+        }
         if self.popup.is_some() {
             self.on_popup_key(k);
             return;
@@ -600,6 +609,7 @@ impl App {
             Action::RewindForward => self.set_rewind(self.rewind.saturating_sub(10)),
             Action::RewindForwardFar => self.set_rewind(self.rewind.saturating_sub(60)),
             Action::Live => self.set_rewind(0),
+            Action::Tune => self.open_tune(),
         }
     }
 
@@ -710,6 +720,42 @@ impl App {
         }
     }
 
+    fn open_tune(&mut self) {
+        if self.readonly {
+            self.toast("read-only mode", true);
+            return;
+        }
+        let i = self.sel_gpu;
+        let Some(g) = self.gpu(i) else { return };
+        let current = self.sample(i).and_then(|s| s.power_limit).or(g.power_limit_default);
+        match current {
+            Some(watts) if g.power_limit_max.is_some() => self.popup = Some(Popup::Tune { gpu: i, watts }),
+            _ => self.toast("this GPU doesn't expose an adjustable power limit", true),
+        }
+    }
+
+    fn on_tune_key(&mut self, k: KeyEvent, sampler: &Sampler) {
+        let Some(Popup::Tune { gpu, watts }) = &mut self.popup else { return };
+        let g = self.info.gpus.get(*gpu);
+        let (lo, hi) = (g.and_then(|g| g.power_limit_min).unwrap_or(0.0), g.and_then(|g| g.power_limit_max).unwrap_or(f64::MAX));
+        let step = if k.modifiers.contains(KeyModifiers::SHIFT) { 25.0 } else { 5.0 };
+        match k.code {
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-') => *watts = (*watts - step).max(lo),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') => *watts = (*watts + step).min(hi),
+            KeyCode::Enter | KeyCode::Char('d') => {
+                let cmd = if k.code == KeyCode::Enter {
+                    crate::backend::Tune::PowerLimit(Some(*watts))
+                } else {
+                    crate::backend::Tune::PowerLimit(None)
+                };
+                sampler.ctl.commands.lock().unwrap().push((*gpu, cmd));
+                sampler.poke();
+                self.popup = None;
+            }
+            _ => self.popup = None,
+        }
+    }
+
     fn on_popup_key(&mut self, k: KeyEvent) {
         let Some(popup) = &mut self.popup else { return };
         match popup {
@@ -749,7 +795,7 @@ impl App {
                 }
                 _ => self.popup = None,
             },
-            Popup::Help => self.popup = None,
+            Popup::Help | Popup::Tune { .. } => self.popup = None,
         }
     }
 
@@ -852,6 +898,13 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, opts: &Ui
         loop {
             while let Ok(s) = sampler.rx.try_recv() {
                 app.ingest(s);
+                dirty = true;
+            }
+            for r in std::mem::take(&mut *sampler.ctl.results.lock().unwrap()) {
+                match r {
+                    Ok(m) => app.toast(m, false),
+                    Err(e) => app.toast(e, true),
+                }
                 dirty = true;
             }
             if app.toast.as_ref().is_some_and(|(_, t, _)| t.elapsed() > Duration::from_secs(3)) {

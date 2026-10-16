@@ -45,6 +45,7 @@ pub enum Action {
     RewindBackFar,
     RewindForwardFar,
     Live,
+    Tune,
 }
 
 impl Action {
@@ -78,6 +79,7 @@ impl Action {
             Action::RewindBack | Action::RewindForward => "rewind / forward 10 samples",
             Action::RewindBackFar | Action::RewindForwardFar => "rewind / forward 60 samples",
             Action::Live => "back to live",
+            Action::Tune => "tune the selected GPU (power limit; needs admin)",
         }
     }
 }
@@ -119,6 +121,7 @@ const DEFAULTS: &[(Action, &[&str])] = &[
     (Action::RewindBackFar, &["{"]),
     (Action::RewindForwardFar, &["}"]),
     (Action::Live, &["0"]),
+    (Action::Tune, &["w"]),
     (Action::Quit, &["q", "ctrl-c"]),
 ];
 

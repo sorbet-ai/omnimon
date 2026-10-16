@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::backend::{Backend, Detected};
+use crate::backend::{Backend, Detected, Tune};
 use crate::host::Host;
 use crate::model::{GpuInfo, GpuSample, ProcRow, Snapshot, SystemInfo, Vendor};
 use crate::os::ProcEnricher;
@@ -57,6 +57,18 @@ impl Collector {
             prev: None,
         };
         (c, info)
+    }
+
+    /// Apply a setting to a GPU (global index).
+    pub fn apply(&mut self, gpu: usize, cmd: &Tune) -> Result<String, String> {
+        let mut start = 0;
+        for (b, &n) in self.backends.iter_mut().zip(&self.counts) {
+            if gpu < start + n {
+                return b.apply(gpu - start, cmd);
+            }
+            start += n;
+        }
+        Err("no such GPU".into())
     }
 
     pub fn collect(&mut self) -> Snapshot {
@@ -110,6 +122,10 @@ pub struct Control {
     pub interval_ms: AtomicU64,
     pub paused: AtomicBool,
     stop: AtomicBool,
+    /// Settings to apply on the sampler thread, which owns the backends.
+    pub commands: std::sync::Mutex<Vec<(usize, Tune)>>,
+    /// Their outcomes, for the UI to report.
+    pub results: std::sync::Mutex<Vec<Result<String, String>>>,
 }
 
 pub struct Sampler {
@@ -127,6 +143,8 @@ impl Sampler {
             interval_ms: AtomicU64::new(interval.as_millis() as u64),
             paused: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            commands: Default::default(),
+            results: Default::default(),
         });
         let ctl2 = ctl.clone();
         let thread = std::thread::Builder::new()
@@ -134,6 +152,11 @@ impl Sampler {
             .spawn(move || {
                 while !ctl2.stop.load(Ordering::Relaxed) {
                     let t0 = Instant::now();
+                    let cmds = std::mem::take(&mut *ctl2.commands.lock().unwrap());
+                    for (gpu, cmd) in cmds {
+                        let r = c.apply(gpu, &cmd);
+                        ctl2.results.lock().unwrap().push(r);
+                    }
                     if !ctl2.paused.load(Ordering::Relaxed) {
                         match tx.try_send(c.collect()) {
                             Ok(()) | Err(TrySendError::Full(_)) => {}

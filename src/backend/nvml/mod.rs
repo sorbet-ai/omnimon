@@ -7,7 +7,7 @@ use std::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void};
 
 use ffi::*;
 
-use super::Backend;
+use super::{Backend, Tune};
 use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
 
 /// Call an optional NVML function pointer; `Err(code)` on failure.
@@ -163,6 +163,25 @@ impl Backend for Nvml {
 
     fn gpus(&self) -> Vec<GpuInfo> {
         self.devs.iter().map(|d| d.info.clone()).collect()
+    }
+
+    fn apply(&mut self, gpu: usize, cmd: &Tune) -> Result<String, String> {
+        let d = self.devs.get(gpu).ok_or("no such GPU")?;
+        match *cmd {
+            Tune::PowerLimit(w) => {
+                let w = w.or(d.info.power_limit_default).ok_or("default power limit unknown")?;
+                if let (Some(lo), Some(hi)) = (d.info.power_limit_min, d.info.power_limit_max)
+                    && !(lo..=hi).contains(&w)
+                {
+                    return Err(format!("{w:.0} W is outside {lo:.0}-{hi:.0} W"));
+                }
+                match call!(self.api.set_power_limit, d.h.0, (w * 1000.0).round() as c_uint) {
+                    Ok(()) => Ok(format!("power limit set to {w:.0} W")),
+                    Err(NVML_ERROR_NO_PERMISSION) => Err("permission denied: changing the power limit needs administrator / root".into()),
+                    Err(e) => Err(self.api.err_str(e)),
+                }
+            }
+        }
     }
 
     fn sample(&mut self) -> Vec<GpuSample> {
@@ -662,5 +681,23 @@ mod tests {
         assert_eq!(v3_stride(true, true, 550), 24);
         assert_eq!(v3_stride(false, false, 531), 32);
         assert_eq!(v3_stride(false, false, 610), 24);
+    }
+}
+
+#[cfg(test)]
+mod hw_tests {
+    use super::*;
+
+    /// Needs a real NVIDIA GPU: `cargo test -- --ignored`. Re-applies the
+    /// current limit (a no-op) to exercise the call and its error reporting.
+    #[test]
+    #[ignore]
+    fn reapply_current_power_limit() {
+        let mut nvml = Nvml::new().expect("NVML");
+        let cur = nvml.sample()[0].power_limit.expect("power limit");
+        let r = nvml.apply(0, &Tune::PowerLimit(Some(cur)));
+        println!("apply({cur} W) -> {r:?}");
+        assert!(r.is_ok() || r.as_ref().unwrap_err().contains("permission"), "{r:?}");
+        assert!(nvml.apply(0, &Tune::PowerLimit(Some(1.0))).unwrap_err().contains("outside"));
     }
 }

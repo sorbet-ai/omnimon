@@ -28,6 +28,18 @@ pub trait Backend: Send {
     fn gpus(&self) -> Vec<GpuInfo>;
     /// One sample per GPU, same order as `gpus()`.
     fn sample(&mut self) -> Vec<GpuSample>;
+    /// Change a device setting. `gpu` is the backend-local index.
+    fn apply(&mut self, gpu: usize, cmd: &Tune) -> Result<String, String> {
+        let _ = (gpu, cmd);
+        Err("not supported for this GPU".into())
+    }
+}
+
+/// Device settings a backend may support changing (usually needs admin/root).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Tune {
+    /// Watts; `None` restores the default.
+    PowerLimit(Option<f64>),
 }
 
 pub struct Detected {

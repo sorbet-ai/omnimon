@@ -220,3 +220,52 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     ctx.draw(f, body(c1), 900, &[Series { data: &memn, grad: t.mem, down: false }]);
     ctx.draw(f, body(c2), 901, &[Series { data: app.hist.tail(&h.sm, ctx.samples(c2.width)), grad: t.util, down: false }]);
 }
+
+pub(super) fn tune(f: &mut Frame, app: &App) {
+    let t = app.theme();
+    let Some(Popup::Tune { gpu, watts }) = &app.popup else { return };
+    let Some(g) = app.gpu(*gpu) else { return };
+    let (lo, hi) = (g.power_limit_min.unwrap_or(0.0), g.power_limit_max.unwrap_or(*watts));
+    let current = app.sample(*gpu).and_then(|s| s.power_limit);
+    let mut lines = vec![
+        Line::from(vec![s(format!("GPU {} · ", gpu), t.dim), s(g.short_name().to_string(), t.fg).bold()]),
+        Line::default(),
+        Line::from(vec![
+            s("power limit  ", t.dim),
+            s(format!("{watts:.0} W",), t.accent).bold(),
+            s(
+                format!(
+                    "   now {} · default {} · range {lo:.0}-{hi:.0} W",
+                    fmt::opt(current.map(|c| c.round()), " W"),
+                    fmt::opt(g.power_limit_default.map(|d| d.round()), " W")
+                ),
+                t.dim,
+            ),
+        ]),
+    ];
+    let bar_w = 50usize;
+    let frac = if hi > lo { ((watts - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 1.0 };
+    let filled = (frac * bar_w as f64).round() as usize;
+    lines.push(Line::from(vec![
+        s("             ", t.dim),
+        s("━".repeat(filled), t.power.at(frac)),
+        s("╌".repeat(bar_w - filled), t.faint),
+    ]));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        s("  ←→ ", t.accent),
+        s("±5 W  ", t.dim),
+        s("shift ", t.accent),
+        s("±25 W  ", t.dim),
+        s("enter ", t.accent),
+        s("apply  ", t.dim),
+        s("d ", t.accent),
+        s("reset to default  ", t.dim),
+        s("esc ", t.accent),
+        s("cancel", t.dim),
+    ]));
+    lines.push(Line::from(s("  Needs administrator / root. Resets at reboot.", t.faint)));
+    let r = centered(f.area(), 78, lines.len() as u16 + 2);
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(lines).block(block(t, true).title_top(Line::from(s(" tune ", t.title).bold()))), r);
+}
