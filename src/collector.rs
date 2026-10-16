@@ -58,7 +58,7 @@ impl Collector {
             info.host.wsl = false;
         }
         if info.host.wsl && info.gpus.iter().any(|g| g.vendor != Vendor::Demo) {
-            info.warnings.push("WSL: the driver doesn't expose per-process GPU data here".into());
+            info.warnings.push("WSL: the driver doesn't report per-process GPU memory or utilization".into());
         }
         let enricher = ProcEnricher::new(&info.gpus);
         let c = Collector {

@@ -231,6 +231,7 @@ nvml_api! {
     sys_nvml_version: SysStr = "nvmlSystemGetNVMLVersion";
     sys_cuda_version_v2: unsafe extern "C" fn(*mut c_int) -> nvmlReturn_t = "nvmlSystemGetCudaDriverVersion_v2";
     sys_cuda_version: unsafe extern "C" fn(*mut c_int) -> nvmlReturn_t = "nvmlSystemGetCudaDriverVersion";
+    sys_process_name: unsafe extern "C" fn(c_uint, *mut c_char, c_uint) -> nvmlReturn_t = "nvmlSystemGetProcessName";
 
     count_v2: unsafe extern "C" fn(*mut c_uint) -> nvmlReturn_t = "nvmlDeviceGetCount_v2";
     count_v1: unsafe extern "C" fn(*mut c_uint) -> nvmlReturn_t = "nvmlDeviceGetCount";

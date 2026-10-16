@@ -728,6 +728,16 @@ fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
         add(l, ProcKind::Compute);
     }
 
+    // The driver knows names even for processes we can't see (another
+    // container, WSLg's compositor): "/Xwayland" -> "Xwayland".
+    for p in map.values_mut() {
+        let mut buf = [0 as c_char; 256];
+        if call!(api.sys_process_name, p.pid, buf.as_mut_ptr(), buf.len() as c_uint).is_ok() {
+            let name = cstr(&buf);
+            p.name_hint = name.rsplit(['/', '\\']).next().filter(|n| !n.is_empty()).map(String::from);
+        }
+    }
+
     if !map.is_empty() {
         // Look back ~1s (like nvitop) so the sample buffer is never empty just
         // because our tick and the driver's sampling period don't line up.
