@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use super::Backend;
-use crate::model::{Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
+use crate::model::{Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, MigInstance, NvLink, PidScope, ProcKind, Throttle, Vendor};
 
 const GIB: u64 = 1 << 30;
 
@@ -33,6 +33,9 @@ const MODELS: &[Model] = &[
     },
 ];
 
+/// The A100's MIG layout in the demo: (GPU instance, profile, SMs, GiB).
+const MIG_LAYOUT: [(u32, &str, u32, f64); 3] = [(1, "3g.20gb", 42, 19.6), (2, "2g.10gb", 28, 9.75), (7, "1g.5gb", 14, 4.75)];
+
 const JOBS: &[&str] = &["python train.py", "vllm serve", "ollama", "torchrun", "blender", "jupyter-kernel", "llama-server", "ffmpeg"];
 
 pub struct Demo {
@@ -40,6 +43,8 @@ pub struct Demo {
     start: Instant,
     rng: u64,
     load: Vec<f64>,
+    /// NVLink error counter of the one flaky link.
+    link_errors: u64,
 }
 
 impl Demo {
@@ -65,10 +70,40 @@ impl Demo {
                 g.architecture = Some(m.arch.into());
                 g.num_fans = if m.arch == "Hopper" || m.name.contains("A100") { 0 } else { 1 };
                 g.compute_mode = Some("Default".into());
+                // SXM parts: H100s on an NVSwitch fabric; the A100 is split with MIG.
+                if m.arch == "Hopper" {
+                    g.nvlink_version = Some(4);
+                    g.nvlink_link_bandwidth = Some(25e9);
+                }
+                g.mig_enabled = Some(m.name.contains("A100"));
                 g
             })
             .collect();
-        Demo { gpus, start: Instant::now(), rng: 0x9E3779B97F4A7C15, load: vec![0.5; n] }
+        Demo { gpus, start: Instant::now(), rng: 0x9E3779B97F4A7C15, load: vec![0.5; n], link_errors: 0 }
+    }
+
+    /// 18 links to an NVSwitch fabric. On one GPU, link 5 has bursts of
+    /// errors and link 11 drops out for a while every few minutes.
+    fn links(&mut self, i: usize, l: f64, t: f64) -> Vec<NvLink> {
+        let flaky = i == if self.gpus.len() >= 4 { 3 } else { 0 };
+        if flaky && (t % 180.0) > 60.0 && (t % 180.0) < 75.0 {
+            self.link_errors += (self.rand() * 40.0) as u64;
+        }
+        (0..18)
+            .map(|link| {
+                let up = !(flaky && link == 11 && (t % 240.0) > 200.0 && (t % 240.0) < 215.0);
+                let rate = |me: &mut Self| up.then(|| (l * 9e9 * (0.7 + 0.6 * me.rand())) as u64);
+                NvLink {
+                    link,
+                    up,
+                    rx: rate(self),
+                    tx: rate(self),
+                    errors: Some(if flaky && link == 5 { self.link_errors } else { 0 }),
+                    peer_bus_id: None,
+                    peer_switch: true,
+                }
+            })
+            .collect()
     }
 
     fn rand(&mut self) -> f64 {
@@ -126,6 +161,7 @@ impl Backend for Demo {
             let tdp = g.power_limit_default.unwrap();
             let temp = (34.0 + 48.0 * l + 2.0 * self.rand()) as u32;
 
+            let mig = g.mig_enabled == Some(true);
             let mut procs = Vec::new();
             if !(i == 1 && self.gpus.len() > 2) {
                 let n = 1 + (i % 3);
@@ -137,11 +173,12 @@ impl Backend for Demo {
                         kind: if k == 2 { ProcKind::Graphics } else { ProcKind::Compute },
                         gpu_mem: Some((total as f64 * mem_frac * share) as u64),
                         gpu_mem_shared: Some(if spilling && k == 0 { 3 * GIB + GIB / 4 } else { 24 << 20 }),
-                        sm_util: Some((l * 100.0 * share * if spilling { 0.3 } else { 1.0 }).round() as f32),
+                        // No per-process utilization under MIG (as on real hardware).
+                        sm_util: (!mig).then(|| (l * 100.0 * share * if spilling { 0.3 } else { 1.0 }).round() as f32),
                         mem_util: Some((l * 60.0 * share).round() as f32),
                         enc_util: Some(0.0),
                         dec_util: Some(if JOBS[(i + k) % JOBS.len()] == "ffmpeg" { 35.0 } else { 0.0 }),
-                        gpu_instance: None,
+                        gpu_instance: mig.then(|| MIG_LAYOUT[k % MIG_LAYOUT.len()].0),
                         name_hint: Some(JOBS[(i * 3 + k) % JOBS.len()].to_string()),
                     });
                 }
@@ -154,7 +191,7 @@ impl Backend for Demo {
                 throttle.push(Throttle::PowerCap);
             }
             out.push(GpuSample {
-                util_gpu: Some((l * 100.0).round() as f32),
+                util_gpu: (!mig).then(|| (l * 100.0).round() as f32),
                 util_mem: Some((l * 55.0).round() as f32),
                 mem_used: Some((total as f64 * mem_frac) as u64),
                 mem_total: Some(total),
@@ -184,6 +221,25 @@ impl Backend for Demo {
                 ecc_uncorrected: Some(0),
                 bar1_used: Some(GIB / 8),
                 bar1_total: Some(total),
+                nvlink: if g.nvlink_version.is_some() { self.links(i, l, t) } else { Vec::new() },
+                mig: if mig {
+                    MIG_LAYOUT
+                        .iter()
+                        .enumerate()
+                        .map(|(k, &(gi, profile, sms, gib))| MigInstance {
+                            gpu_instance: gi,
+                            compute_instance: Some(0),
+                            profile: profile.into(),
+                            uuid: Some(format!("MIG-demo-{i:02}{gi:02}-0000-0000-000000000000")),
+                            sm_count: Some(sms),
+                            mem_used: Some((gib * GIB as f64 * (0.35 + 0.5 * ((t / 20.0 + k as f64).sin().abs()))) as u64),
+                            mem_total: Some((gib * GIB as f64) as u64),
+                            activity: None,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 // Only Hopper and newer report unit activity (NVIDIA GPM).
                 activity: (g.architecture.as_deref() == Some("Hopper")).then(|| {
                     let pct = |x: f64| Some((x * 100.0).clamp(0.0, 100.0).round() as f32);

@@ -48,7 +48,7 @@ impl Col {
     /// 0 = takes the remaining width.
     fn width(self) -> u16 {
         match self {
-            Col::Gpu => 3,
+            Col::Gpu => 4,
             Col::Pid => 8,
             Col::User => 10,
             Col::Kind => 4,
@@ -99,7 +99,8 @@ fn cell<'a>(col: Col, p: &ProcRow, c: &Ctx) -> Cell<'a> {
     let u = &p.usage;
     let dash = || rcell("-".into(), t.faint);
     match col {
-        Col::Gpu => rcell(p.gpu.to_string(), t.accent),
+        // "2/7": GPU 2, MIG instance 7.
+        Col::Gpu => rcell(p.usage.gpu_instance.map(|gi| format!("{}/{gi}", p.gpu)).unwrap_or_else(|| p.gpu.to_string()), t.accent),
         Col::Pid => {
             let (txt, st) = match p.mapping {
                 PidMapping::Direct => (p.pid().to_string(), c.base),

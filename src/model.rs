@@ -90,6 +90,10 @@ pub struct GpuInfo {
     pub display_active: Option<bool>,
     pub compute_mode: Option<String>,
     pub mig_enabled: Option<bool>,
+    /// NVLink generation (2 = Volta, 3 = Ampere, 4 = Hopper, 5 = Blackwell).
+    pub nvlink_version: Option<u32>,
+    /// NVLink bandwidth per link and direction, bytes/s.
+    pub nvlink_link_bandwidth: Option<f64>,
 }
 
 impl GpuInfo {
@@ -255,6 +259,48 @@ pub struct Spill {
     pub reason: String,
 }
 
+/// One NVLink port.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NvLink {
+    pub link: u32,
+    pub up: bool,
+    /// Payload bytes/s.
+    pub rx: Option<u64>,
+    pub tx: Option<u64>,
+    /// Link-level errors since the driver loaded (replays, recoveries, CRC).
+    pub errors: Option<u64>,
+    /// PCI bus id of the GPU on the other end (None for a switch).
+    pub peer_bus_id: Option<String>,
+    pub peer_switch: bool,
+}
+
+/// One MIG partition (a GPU instance, with its compute instance).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MigInstance {
+    pub gpu_instance: u32,
+    pub compute_instance: Option<u32>,
+    /// Profile, e.g. "3g.20gb".
+    pub profile: String,
+    pub uuid: Option<String>,
+    pub sm_count: Option<u32>,
+    pub mem_used: Option<u64>,
+    pub mem_total: Option<u64>,
+    /// Unit activity of this slice (Hopper+); `sm_active` is its utilization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
+}
+
+impl MigInstance {
+    pub fn mem_frac(&self) -> Option<f64> {
+        match (self.mem_used, self.mem_total) {
+            (Some(u), Some(t)) if t > 0 => Some(u as f64 / t as f64),
+            _ => None,
+        }
+    }
+}
+
 /// What the GPU's execution units and memory are doing, beyond the coarse
 /// "utilization" (which only says *something* ran). Percentages are of time
 /// or of peak; NVIDIA reports these on Hopper and newer (GPM).
@@ -323,6 +369,11 @@ pub struct GpuSample {
     /// Execution-unit and memory activity, where the hardware reports it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Activity>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub nvlink: Vec<NvLink>,
+    /// MIG partitions, when MIG is on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mig: Vec<MigInstance>,
     pub spill: Spill,
     /// Backend -> collector only; the joined list is `Snapshot::processes`.
     #[serde(skip)]
@@ -332,6 +383,15 @@ pub struct GpuSample {
 }
 
 impl GpuSample {
+    /// Total NVLink payload rate (rx, tx), from per-link counters or GPM.
+    pub fn nvlink_rate(&self) -> Option<(u64, u64)> {
+        let sum = |f: fn(&NvLink) -> Option<u64>| self.nvlink.iter().map(f).sum::<Option<u64>>();
+        match (sum(|l| l.rx), sum(|l| l.tx)) {
+            (Some(r), Some(t)) if !self.nvlink.is_empty() => Some((r, t)),
+            _ => self.activity.as_ref().and_then(|a| Some((a.nvlink_rx?, a.nvlink_tx?))),
+        }
+    }
+
     pub fn mem_frac(&self) -> Option<f64> {
         match (self.mem_used, self.mem_total) {
             (Some(u), Some(t)) if t > 0 => Some(u as f64 / t as f64),

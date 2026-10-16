@@ -158,6 +158,41 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
             })
             .collect(),
     );
+    let links = |f: fn(&crate::model::NvLink) -> Option<f64>| -> Vec<(String, f64)> {
+        s.gpus
+            .iter()
+            .enumerate()
+            .flat_map(|(i, g)| g.nvlink.iter().filter_map(move |l| Some((format!("{},link=\"{}\"", gl(i)?, l.link), f(l)?))))
+            .collect()
+    };
+    metric("gpu_nvlink_up", "NVLink link state (1 = up).", "gauge", links(|l| Some(if l.up { 1.0 } else { 0.0 })));
+    metric("gpu_nvlink_link_rx_bytes_per_second", "NVLink payload received, per link.", "gauge", links(|l| l.rx.map(|v| v as f64)));
+    metric("gpu_nvlink_link_tx_bytes_per_second", "NVLink payload sent, per link.", "gauge", links(|l| l.tx.map(|v| v as f64)));
+    metric(
+        "gpu_nvlink_errors",
+        "NVLink replay + recovery + CRC errors since driver load.",
+        "counter",
+        links(|l| l.errors.map(|v| v as f64)),
+    );
+    let parts = |f: fn(&crate::model::MigInstance) -> Option<f64>| -> Vec<(String, f64)> {
+        s.gpus
+            .iter()
+            .enumerate()
+            .flat_map(|(i, g)| {
+                g.mig.iter().filter_map(move |m| {
+                    Some((format!("{},gpu_instance=\"{}\",profile=\"{}\"", gl(i)?, m.gpu_instance, esc(&m.profile)), f(m)?))
+                })
+            })
+            .collect()
+    };
+    metric("mig_memory_used_bytes", "Memory used in a MIG partition.", "gauge", parts(|m| m.mem_used.map(|v| v as f64)));
+    metric("mig_memory_total_bytes", "Memory of a MIG partition.", "gauge", parts(|m| m.mem_total.map(|v| v as f64)));
+    metric(
+        "mig_sm_active_percent",
+        "Share of time a MIG partition's SMs had work (GPM).",
+        "gauge",
+        parts(|m| m.activity.as_ref()?.sm_active.map(f64::from)),
+    );
     metric(
         "gpu_clock_limit_reason",
         "Active clock limiting reasons (1 = active).",

@@ -122,6 +122,33 @@ pub fn diagnose(info: &GpuInfo, s: &GpuSample, procs: &[&ProcRow], recent: Recen
     {
         add(Severity::Info, "Allocated but idle", format!("{:.0}% of VRAM held, {avg:.1}% average utilization recently", m * 100.0));
     }
+    // NVLink: a dead link sends peer traffic over fewer links (or PCIe).
+    let down: Vec<String> = s.nvlink.iter().filter(|l| !l.up).map(|l| l.link.to_string()).collect();
+    if !down.is_empty() && s.nvlink.iter().any(|l| l.up) {
+        add(
+            Severity::Crit,
+            "NVLink link down",
+            format!(
+                "link {} of {} is down; GPU-to-GPU traffic has less bandwidth (check the board, cable or NVSwitch)",
+                down.join(", "),
+                s.nvlink.len()
+            ),
+        );
+    }
+    let errs: Vec<String> = s
+        .nvlink
+        .iter()
+        .filter(|l| l.errors.is_some_and(|e| e > 0))
+        .map(|l| format!("link {}: {}", l.link, l.errors.unwrap_or(0)))
+        .collect();
+    if !errs.is_empty() {
+        add(
+            Severity::Info,
+            "NVLink errors recorded",
+            format!("{} (replays, recoveries, CRC since the driver loaded); a rising count points at hardware", errs.join(", ")),
+        );
+    }
+
     out.sort_by_key(|f| std::cmp::Reverse(f.severity));
     out
 }

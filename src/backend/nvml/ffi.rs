@@ -45,6 +45,32 @@ pub const NVML_MEMORY_ERROR_TYPE_UNCORRECTED: c_uint = 1;
 pub const NVML_VOLATILE_ECC: c_uint = 0;
 
 pub const NVML_FI_DEV_MEMORY_TEMP: c_uint = 82;
+/// Common NVLink speed of the device's links, MB/s.
+pub const NVML_FI_DEV_NVLINK_SPEED_MBPS_COMMON: c_uint = 90;
+/// Per-link (scope = link) payload counters, KiB.
+pub const NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_TX: c_uint = 138;
+pub const NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_RX: c_uint = 139;
+pub const NVML_VALUE_TYPE_DOUBLE: c_uint = 0;
+
+pub const NVML_NVLINK_MAX_LINKS: c_uint = 36;
+pub const NVML_NVLINK_ERROR_DL_REPLAY: c_uint = 0;
+pub const NVML_NVLINK_ERROR_DL_RECOVERY: c_uint = 1;
+pub const NVML_NVLINK_ERROR_DL_CRC_FLIT: c_uint = 2;
+pub const NVML_NVLINK_DEVICE_TYPE_SWITCH: c_uint = 2;
+
+#[repr(C)]
+#[derive(Default)]
+pub struct nvmlDeviceAttributes_t {
+    pub multiprocessor_count: c_uint,
+    pub shared_copy_engine_count: c_uint,
+    pub shared_decoder_count: c_uint,
+    pub shared_encoder_count: c_uint,
+    pub shared_jpeg_count: c_uint,
+    pub shared_ofa_count: c_uint,
+    pub gpu_instance_slice_count: c_uint,
+    pub compute_instance_slice_count: c_uint,
+    pub memory_size_mb: c_ulonglong,
+}
 
 #[repr(C)]
 #[derive(Default)]
@@ -151,10 +177,10 @@ pub struct nvmlGpmMetric_t {
     pub unit: *const c_char,
 }
 
-/// The C struct ends in `metrics[NVML_GPM_METRIC_MAX]` (98, later 210);
+/// The C struct ends in `metrics[NVML_GPM_METRIC_MAX]` (98, now 477);
 /// NVML only touches the first `num_metrics`, and we leave room for the
 /// largest anyway.
-pub const GPM_METRICS_CAP: usize = 256;
+pub const GPM_METRICS_CAP: usize = 512;
 
 #[repr(C)]
 pub struct nvmlGpmMetricsGet_t {
@@ -277,6 +303,19 @@ nvml_api! {
     gpm_sample_free: unsafe extern "C" fn(nvmlGpmSample_t) -> nvmlReturn_t = "nvmlGpmSampleFree";
     gpm_sample_get: unsafe extern "C" fn(nvmlDevice_t, nvmlGpmSample_t) -> nvmlReturn_t = "nvmlGpmSampleGet";
     gpm_metrics_get: unsafe extern "C" fn(*mut nvmlGpmMetricsGet_t) -> nvmlReturn_t = "nvmlGpmMetricsGet";
+    gpm_mig_sample_get: unsafe extern "C" fn(nvmlDevice_t, c_uint, nvmlGpmSample_t) -> nvmlReturn_t = "nvmlGpmMigSampleGet";
+
+    nvlink_state: DevUU = "nvmlDeviceGetNvLinkState";
+    nvlink_version: DevUU = "nvmlDeviceGetNvLinkVersion";
+    nvlink_error_counter: unsafe extern "C" fn(nvmlDevice_t, c_uint, c_uint, *mut c_ulonglong) -> nvmlReturn_t = "nvmlDeviceGetNvLinkErrorCounter";
+    nvlink_remote_pci_v2: unsafe extern "C" fn(nvmlDevice_t, c_uint, *mut nvmlPciInfo_t) -> nvmlReturn_t = "nvmlDeviceGetNvLinkRemotePciInfo_v2";
+    nvlink_remote_type: DevUU = "nvmlDeviceGetNvLinkRemoteDeviceType";
+
+    max_mig_count: DevU = "nvmlDeviceGetMaxMigDeviceCount";
+    mig_handle_by_index: unsafe extern "C" fn(nvmlDevice_t, c_uint, *mut nvmlDevice_t) -> nvmlReturn_t = "nvmlDeviceGetMigDeviceHandleByIndex";
+    gpu_instance_id: DevU = "nvmlDeviceGetGpuInstanceId";
+    compute_instance_id: DevU = "nvmlDeviceGetComputeInstanceId";
+    attributes_v2: unsafe extern "C" fn(nvmlDevice_t, *mut nvmlDeviceAttributes_t) -> nvmlReturn_t = "nvmlDeviceGetAttributes_v2";
 }
 
 /// Places NVML is commonly found. Order matters: versioned soname first

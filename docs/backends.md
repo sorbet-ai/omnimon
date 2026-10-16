@@ -31,12 +31,28 @@ real hardware during development.
   MiB/s (60/61). Shown as `Activity`; Ada and older GeForce answer "not
   supported" (checked on an RTX 4090), so nothing is shown there.
 
+### NVLink, implemented, untested on hardware (`nvml/links.rs`)
+- Ports: `nvmlDeviceGetNvLinkState` for links 0..36 (whatever answers).
+  Peer: `nvmlDeviceGetNvLinkRemoteDeviceType` (2 = NVSwitch), else
+  `nvmlDeviceGetNvLinkRemotePciInfo_v2` → matched to our GPUs by bus id.
+- Traffic: `nvmlDeviceGetFieldValues` with `NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_RX`
+  / `_TX` (139 / 138, KiB counters, scope = link), as rates between ticks.
+  Hopper+ also has GPM totals. (The old utilization-counter API is deprecated.)
+- Errors: `nvmlDeviceGetNvLinkErrorCounter` replay (0) + recovery (1) + CRC
+  flit (2). Events on link down/up and each doubling of a link's error count.
+- Speed: field `NVML_FI_DEV_NVLINK_SPEED_MBPS_COMMON` (90). Generation from
+  the architecture (`nvmlDeviceGetNvLinkVersion` changed its numbering to an
+  enum, so it is only logged).
+
+### MIG, implemented, untested on hardware (`nvml/mig.rs`)
+- `nvmlDeviceGetMigMode` (current = 1) → `nvmlDeviceGetMaxMigDeviceCount` →
+  `nvmlDeviceGetMigDeviceHandleByIndex` each tick (skips `NOT_FOUND`), then per
+  partition: GPU/compute instance ids, name (profile after "MIG "), UUID,
+  memory, `nvmlDeviceGetAttributes_v2` (SM count), its compute processes, and
+  on Hopper+ `nvmlGpmMigSampleGet` for per-partition activity. The parent GPU
+  reports no utilization under MIG; the UI says so.
+
 ### Not yet implemented
-- **MIG**: `nvmlDeviceGetMigMode` → `nvmlDeviceGetMaxMigDeviceCount` →
-  `nvmlDeviceGetMigDeviceHandleByIndex` (skip `NOT_FOUND` gaps). Per-instance
-  memory works; utilization doesn't (use GPM). Process entries carry
-  `gpuInstanceId`/`computeInstanceId` (already parsed into
-  `GpuProcess::gpu_instance`).
 - **Instant power**: `nvmlDeviceGetFieldValues` with `NVML_FI_DEV_POWER_INSTANT`
   (Ampere+ `GetPowerUsage` is a 1 s average). Verify the field id against nvml.h.
 - `nvmlDeviceGetRunningProcessDetailList` (r550+, struct-versioned): avoids

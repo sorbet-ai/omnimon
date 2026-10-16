@@ -3,7 +3,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::App;
@@ -189,6 +189,19 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
     let title = |x: &str| Line::from(vec![s(format!(" {x} "), t.title).bold(), s(format!("GPU {i} "), t.dim)]);
+    let fabric = fabric_lines(app, g, sm, l.width.saturating_sub(2));
+    let l = if fabric.is_empty() {
+        l
+    } else {
+        let [dev, fab] = Layout::vertical([Constraint::Length(device.len() as u16 + 2), Constraint::Fill(1)]).areas(l);
+        let name = match (sm.nvlink.is_empty(), sm.mig.is_empty()) {
+            (false, true) => "NVLink",
+            (true, false) => "MIG",
+            _ => "NVLink · MIG",
+        };
+        f.render_widget(Paragraph::new(fabric).block(block(t, false).title_top(title(name))), fab);
+        dev
+    };
     f.render_widget(Paragraph::new(kv(device)).wrap(Wrap { trim: false }).block(block(t, false).title_top(title("Device"))), l);
     // Diagnosis above the live values.
     let recent = app.store.hist.gpus.get(i).map(|h| {
@@ -219,6 +232,99 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
         dr,
     );
     f.render_widget(Paragraph::new(kv(live)).wrap(Wrap { trim: false }).block(block(t, false).title_top(title("Live"))), lr);
+}
+
+/// NVLink ports as a grid, then one line per MIG partition.
+fn fabric_lines(app: &App, g: &crate::model::GpuInfo, sm: &crate::model::GpuSample, width: u16) -> Vec<Line<'static>> {
+    let t = app.theme();
+    let mut out = Vec::new();
+    if !sm.nvlink.is_empty() {
+        let peer = |l: &crate::model::NvLink| -> String {
+            if l.peer_switch {
+                return "NVSwitch".into();
+            }
+            let Some(bus) = &l.peer_bus_id else { return "?".into() };
+            app.info
+                .gpus
+                .iter()
+                .position(|o| o.pci_bus_id.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(bus)))
+                .map(|j| format!("GPU {j}"))
+                .unwrap_or_else(|| bus.clone())
+        };
+        let all_switch = sm.nvlink.iter().all(|l| l.peer_switch);
+        let up = sm.nvlink.iter().filter(|l| l.up).count();
+        let mut head = vec![
+            s(format!("{}{} links", g.nvlink_version.map(|v| format!("NVLink {v} · ")).unwrap_or_default(), sm.nvlink.len()), t.fg),
+            s(format!(" · {up} up"), if up == sm.nvlink.len() { t.ok } else { t.crit }),
+        ];
+        if let Some(bw) = g.nvlink_link_bandwidth {
+            head.push(s(format!(" · {}/dir each", fmt::bandwidth(bw).replace(" GB/s", "GB/s").replace(" TB/s", "TB/s")), t.dim));
+        }
+        if all_switch {
+            head.push(s(" · via NVSwitch", t.dim));
+        }
+        out.push(Line::from(head));
+        // Each port: "05 ▼1.2G ▲1.1G" (+ peer when not a switch, ! with errors).
+        let cells: Vec<Vec<Span<'static>>> = sm
+            .nvlink
+            .iter()
+            .map(|l| {
+                let mut c = vec![s(format!("{:>2} ", l.link), t.dim)];
+                if !l.up {
+                    c.push(s("down", t.crit).bold());
+                } else {
+                    c.push(s(format!("▼{:<6}▲{:<6}", short_rate(l.rx), short_rate(l.tx)), t.fg));
+                }
+                if !all_switch {
+                    c.push(s(format!(" →{}", peer(l)), t.accent));
+                }
+                if let Some(e) = l.errors.filter(|&e| e > 0) {
+                    c.push(s(format!(" !{e}"), t.warn));
+                }
+                c
+            })
+            .collect();
+        let cell_w = cells.iter().map(|c| c.iter().map(|x| x.content.chars().count()).sum::<usize>()).max().unwrap_or(1) + 2;
+        let per_row = (width as usize / cell_w).max(1);
+        for row in cells.chunks(per_row) {
+            let mut line = Vec::new();
+            for c in row {
+                let w: usize = c.iter().map(|x| x.content.chars().count()).sum();
+                line.extend(c.iter().cloned());
+                line.push(Span::raw(" ".repeat(cell_w - w)));
+            }
+            out.push(Line::from(line));
+        }
+    }
+    if !sm.mig.is_empty() {
+        if !out.is_empty() {
+            out.push(Line::default());
+        }
+        let procs = app.procs();
+        for m in &sm.mig {
+            let n = procs.iter().filter(|p| p.gpu == g.index && p.usage.gpu_instance == Some(m.gpu_instance)).count();
+            let mem = match (m.mem_used, m.mem_total) {
+                (Some(u), Some(tot)) => format!("{} / {}", fmt::bytes_short(u), fmt::bytes_short(tot)),
+                _ => "N/A".into(),
+            };
+            let mut line = vec![
+                s(format!("GI {:<3}", m.gpu_instance), t.accent),
+                s(format!("{:<10}", m.profile), t.fg).bold(),
+                s(format!("{:>4} SMs  ", m.sm_count.map(|c| c.to_string()).unwrap_or_else(|| "?".into())), t.dim),
+                s(format!("{mem:<16}"), m.mem_frac().map(|f| t.mem.at(f)).unwrap_or(t.fg)),
+            ];
+            if let Some(u) = m.activity.as_ref().and_then(|a| a.sm_active) {
+                line.push(s(format!("busy {u:.0}%  "), t.util.at(u as f64 / 100.0)));
+            }
+            line.push(s(format!("{n} proc{}", if n == 1 { "" } else { "s" }), t.dim));
+            out.push(Line::from(line));
+        }
+    }
+    out
+}
+
+fn short_rate(v: Option<u64>) -> String {
+    v.map(fmt::bytes_short).unwrap_or_else(|| "-".into())
 }
 
 /// What the execution units and memory are doing (NVIDIA GPM, Hopper+).

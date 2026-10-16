@@ -166,7 +166,13 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
     let clk = sm.clock_sm.or(sm.clock_graphics);
     let mem_grad = if sm.spill.level == SpillLevel::Spilling { t.temp } else { t.mem };
     let core: [(&str, Option<f64>, Gradient, String); 3] = [
-        ("GPU", sm.util_gpu.map(|v| v as f64 / 100.0), t.util, fmt::pct(sm.util_gpu)),
+        (
+            "GPU",
+            sm.util_gpu.map(|v| v as f64 / 100.0),
+            t.util,
+            // MIG GPUs only report utilization per partition (see Details).
+            if sm.util_gpu.is_none() && !sm.mig.is_empty() { "N/A (MIG)".into() } else { fmt::pct(sm.util_gpu) },
+        ),
         ("MEM", sm.mem_frac(), mem_grad, mem_text(sm)),
         (
             "PWR",
@@ -223,11 +229,23 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
             info.push(s(" ▲", t.accent2));
             info.push(s(fmt::rate(tx), t.fg));
         }
-        if let Some((rx, tx)) = act.and_then(|a| Some((a.nvlink_rx?, a.nvlink_tx?))).filter(|(r, x)| r + x > 0) {
-            info.push(s("  NVL ▼", t.dim));
-            info.push(s(fmt::rate(rx), t.fg));
-            info.push(s(" ▲", t.dim));
-            info.push(s(fmt::rate(tx), t.fg));
+        if !sm.nvlink.is_empty() || sm.nvlink_rate().is_some() {
+            info.push(s("  NVL", t.dim));
+            if !sm.nvlink.is_empty() {
+                let up = sm.nvlink.iter().filter(|l| l.up).count();
+                let col = if up == sm.nvlink.len() { t.ok } else { t.crit };
+                info.push(s(format!(" {up}/{}", sm.nvlink.len()), col));
+            }
+            if let Some((rx, tx)) = sm.nvlink_rate() {
+                info.push(s(" ▼", t.dim));
+                info.push(s(fmt::rate(rx), t.fg));
+                info.push(s(" ▲", t.dim));
+                info.push(s(fmt::rate(tx), t.fg));
+            }
+        }
+        if !sm.mig.is_empty() {
+            info.push(s("  MIG ", t.dim));
+            info.push(s(format!("{}×", sm.mig.len()), t.accent));
         }
         f.render_widget(Paragraph::new(Line::from(info)), Rect { y: left.y + nbars as u16, height: 1, ..left });
     }

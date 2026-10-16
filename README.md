@@ -37,6 +37,9 @@ workload is spilling out of VRAM.
   environment (`CUDA_VISIBLE_DEVICES`, `HIP_*`, `NCCL_*`...), and its history.
 - **Charts**: utilization, memory, power, temperature, SM clock, PCIe rx/tx;
   on Hopper and newer also tensor-core activity and real memory bandwidth.
+- **NVLink and MIG** (NVIDIA data-center GPUs): links up/down, traffic and
+  errors per link, peers (GPU or NVSwitch); MIG partitions with memory, SMs,
+  processes (`GPU/instance` in the table) and, on Hopper+, utilization.
 - **Unit activity** (NVIDIA Hopper+, via GPM): SM active/occupancy, tensor
   cores by precision, FP pipes, DRAM bandwidth in TB/s, NVLink traffic.
   Real anti-aliased pixel plots in terminals that support images (kitty,

@@ -32,6 +32,10 @@ pub enum Kind {
     ProcStart,
     ProcExit,
     ProcSpill,
+    LinkDown,
+    LinkUp,
+    LinkErrors,
+    MigChange,
     #[default]
     #[serde(other)]
     Other,
@@ -49,6 +53,10 @@ impl Kind {
             Kind::ProcStart => "proc_start",
             Kind::ProcExit => "proc_exit",
             Kind::ProcSpill => "proc_spill",
+            Kind::LinkDown => "link_down",
+            Kind::LinkUp => "link_up",
+            Kind::LinkErrors => "link_errors",
+            Kind::MigChange => "mig_change",
             Kind::Other => "other",
         }
     }
@@ -90,6 +98,29 @@ pub fn diff(prev: &Snapshot, cur: &Snapshot) -> Vec<Event> {
         for r in was.iter().filter(|r| !now.contains(r)) {
             ev(i, Kind::ThrottleCleared, Severity::Info, None, format!("GPU {i}: {} cleared", r.label()));
         }
+        for l in &b.nvlink {
+            let Some(was) = a.nvlink.iter().find(|x| x.link == l.link) else { continue };
+            match (was.up, l.up) {
+                (true, false) => ev(i, Kind::LinkDown, Severity::Crit, None, format!("GPU {i}: NVLink link {} down", l.link)),
+                (false, true) => ev(i, Kind::LinkUp, Severity::Info, None, format!("GPU {i}: NVLink link {} back up", l.link)),
+                _ => {}
+            }
+            // Error counters only grow; report each doubling, so a burst
+            // gives a handful of events rather than one per second.
+            if let (Some(e0), Some(e1)) = (was.errors, l.errors)
+                && magnitude(e1) > magnitude(e0)
+            {
+                ev(i, Kind::LinkErrors, Severity::Warn, None, format!("GPU {i}: NVLink link {} errors at {e1} (+{})", l.link, e1 - e0));
+            }
+        }
+        let gis = |s: &crate::model::GpuSample| s.mig.iter().map(|m| (m.gpu_instance, m.profile.clone())).collect::<Vec<_>>();
+        let (was, now) = (gis(a), gis(b));
+        for (gi, profile) in now.iter().filter(|m| !was.contains(m)) {
+            ev(i, Kind::MigChange, Severity::Info, None, format!("GPU {i}: MIG instance {gi} ({profile}) created"));
+        }
+        for (gi, profile) in was.iter().filter(|m| !now.contains(m)) {
+            ev(i, Kind::MigChange, Severity::Info, None, format!("GPU {i}: MIG instance {gi} ({profile}) removed"));
+        }
         if a.spill.level != SpillLevel::Spilling && b.spill.level == SpillLevel::Spilling {
             let slow = b.spill.slowdown.filter(|x| *x >= 1.5).map(|x| format!(", ≈{x:.0}× slower")).unwrap_or_default();
             ev(i, Kind::SpillStart, Severity::Crit, None, format!("GPU {i}: spill started, {}{slow}", b.spill.reason));
@@ -116,6 +147,11 @@ pub fn diff(prev: &Snapshot, cur: &Snapshot) -> Vec<Event> {
         ev(g, Kind::ProcExit, Severity::Info, Some(pid), format!("GPU {g}: {} ({pid}) exited", p.name));
     }
     out
+}
+
+/// Number of binary digits: 0 for 0, then 1, 2, 2, 3, 3, 3, 3, 4...
+fn magnitude(n: u64) -> u32 {
+    64 - n.leading_zeros()
 }
 
 #[cfg(test)]
@@ -165,6 +201,28 @@ mod tests {
         let e = diff(&b, &a);
         assert!(e.iter().any(|e| e.text.contains("spill ended")));
         assert!(e.iter().any(|e| e.text.contains("hw thermal cleared")));
+    }
+
+    #[test]
+    fn nvlink_and_mig_edges() {
+        use crate::model::{MigInstance, NvLink};
+        let link = |up, errors| NvLink { link: 3, up, errors: Some(errors), peer_switch: true, ..Default::default() };
+        let gpu = |l: NvLink, mig: Vec<MigInstance>| GpuSample { nvlink: vec![l], mig, ..Default::default() };
+        let part = MigInstance { gpu_instance: 2, profile: "2g.10gb".into(), ..Default::default() };
+        let a = snap(1.0, gpu(link(true, 0), vec![]), vec![]);
+        let b = snap(2.0, gpu(link(false, 5), vec![part]), vec![]);
+        let e = diff(&a, &b);
+        assert!(e.iter().any(|e| e.kind == Kind::LinkDown && e.severity == Severity::Crit));
+        assert!(e.iter().any(|e| e.kind == Kind::LinkErrors && e.text.contains("at 5 (+5)")));
+        assert!(e.iter().any(|e| e.kind == Kind::MigChange && e.text.contains("2 (2g.10gb) created")));
+        // More errors within the same power of two: quiet.
+        let c = snap(3.0, gpu(link(false, 7), b.gpus[0].mig.clone()), vec![]);
+        assert!(diff(&b, &c).is_empty());
+        let d = snap(4.0, gpu(link(true, 9), vec![]), vec![]);
+        let e = diff(&c, &d);
+        assert!(e.iter().any(|e| e.kind == Kind::LinkUp));
+        assert!(e.iter().any(|e| e.kind == Kind::LinkErrors));
+        assert!(e.iter().any(|e| e.text.contains("removed")));
     }
 
     #[test]

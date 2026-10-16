@@ -24,6 +24,9 @@ macro_rules! call {
     };
 }
 
+mod links;
+mod mig;
+
 /// Metrics we remember as "not supported" per device so we stop asking.
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -71,6 +74,9 @@ struct Dev {
     unsupported: u64,
     /// Hopper+ performance monitoring, when the device supports it.
     gpm: Option<Gpm>,
+    links: Option<links::Links>,
+    /// MIG partitions, when MIG mode is on.
+    mig: Option<mig::Mig>,
 }
 
 /// Two GPM sample buffers: metrics come from the previous tick's sample and
@@ -103,6 +109,10 @@ impl Gpm {
     fn new(api: &Api, h: nvmlDevice_t) -> Option<Gpm> {
         let mut sup = nvmlGpmSupport_t { version: NVML_GPM_SUPPORT_VERSION, is_supported_device: 0 };
         call!(api.gpm_query_support, h, &mut sup).ok().filter(|_| sup.is_supported_device != 0)?;
+        Gpm::alloc(api)
+    }
+
+    fn alloc(api: &Api) -> Option<Gpm> {
         let (mut a, mut b): (nvmlGpmSample_t, nvmlGpmSample_t) = (std::ptr::null_mut(), std::ptr::null_mut());
         call!(api.gpm_sample_alloc, &mut a).ok()?;
         if call!(api.gpm_sample_alloc, &mut b).is_err() {
@@ -117,9 +127,10 @@ impl Gpm {
         let _ = call!(api.gpm_sample_free, self.cur);
     }
 
-    /// Activity since the previous call (None on the first).
-    fn sample(&mut self, api: &Api, h: nvmlDevice_t) -> Option<Activity> {
-        if call!(api.gpm_sample_get, h, self.cur).is_err() {
+    /// Activity since the previous call (None on the first). `get` fills a
+    /// sample buffer (whole GPU or one MIG partition).
+    fn sample(&mut self, api: &Api, get: impl FnOnce(nvmlGpmSample_t) -> Result<(), nvmlReturn_t>) -> Option<Activity> {
+        if get(self.cur).is_err() {
             self.primed = false;
             return None;
         }
@@ -234,9 +245,16 @@ impl Nvml {
                 continue;
             }
             let info = static_info(&api, h);
+            let mut info = info;
             let gpm = Gpm::new(&api, h);
-            log::debug!("NVML device {i}: GPM {}", if gpm.is_some() { "supported" } else { "not supported" });
-            devs.push(Dev { h: Handle(h), info, unsupported: 0, gpm });
+            let links = links::Links::probe(&api, h);
+            if links.is_some() {
+                info.nvlink_version = links::version_for(info.architecture.as_deref());
+                info.nvlink_link_bandwidth = links::link_bandwidth(&api, h);
+            }
+            let mig = mig::Mig::probe(&api, h);
+            log::debug!("NVML device {i}: GPM {}, NVLink {}, MIG {}", gpm.is_some(), links.is_some(), mig.is_some());
+            devs.push(Dev { h: Handle(h), info, unsupported: 0, gpm, links, mig });
         }
 
         let info = BackendInfo {
@@ -253,8 +271,13 @@ impl Nvml {
 
 impl Drop for Nvml {
     fn drop(&mut self) {
-        for g in self.devs.iter().filter_map(|d| d.gpm.as_ref()) {
-            g.free(&self.api);
+        for d in &self.devs {
+            if let Some(g) = &d.gpm {
+                g.free(&self.api);
+            }
+            if let Some(m) = &d.mig {
+                m.free(&self.api);
+            }
         }
         let _ = call!(self.api.shutdown);
     }
@@ -552,10 +575,33 @@ fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
     s.ecc_uncorrected = d.q(M::EccUncorr, || ecc(NVML_MEMORY_ERROR_TYPE_UNCORRECTED));
 
     if let Some(g) = &mut d.gpm {
-        s.activity = g.sample(api, h);
+        s.activity = g.sample(api, |buf| call!(api.gpm_sample_get, h, buf));
+    }
+    if let Some(l) = &mut d.links {
+        s.nvlink = l.sample(api, h);
     }
 
     s.processes = processes(api, d, v3_stride);
+    let gpm = d.gpm.is_some();
+    if let Some(m) = &mut d.mig {
+        let (parts, procs) = m.sample(api, h, gpm, v3_stride);
+        s.mig = parts;
+        // Partitions report their own processes; the parent's list may lack
+        // them (or their instance ids) without admin rights.
+        for (gi, p) in procs {
+            match s.processes.iter_mut().find(|q| q.pid == p.pid) {
+                Some(q) => q.gpu_instance = q.gpu_instance.or(Some(gi)),
+                None => s.processes.push(GpuProcess {
+                    pid: p.pid,
+                    scope: if cfg!(windows) { PidScope::Local } else { PidScope::Driver },
+                    kind: ProcKind::Compute,
+                    gpu_mem: p.mem,
+                    gpu_instance: Some(gi),
+                    ..Default::default()
+                }),
+            }
+        }
+    }
     s
 }
 
