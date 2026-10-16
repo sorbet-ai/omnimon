@@ -3,6 +3,8 @@
 //! Pure, so it is unit-tested; the collector attaches new events to each
 //! snapshot and the UI keeps the log.
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::fmt;
@@ -16,25 +18,66 @@ pub enum Severity {
     Crit,
 }
 
+/// What happened, for scripts (alert hooks, JSON consumers) that shouldn't
+/// parse the text.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    GpuError,
+    GpuRecovered,
+    Throttle,
+    ThrottleCleared,
+    SpillStart,
+    SpillEnd,
+    ProcStart,
+    ProcExit,
+    ProcSpill,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::GpuError => "gpu_error",
+            Kind::GpuRecovered => "gpu_recovered",
+            Kind::Throttle => "throttle",
+            Kind::ThrottleCleared => "throttle_cleared",
+            Kind::SpillStart => "spill_start",
+            Kind::SpillEnd => "spill_end",
+            Kind::ProcStart => "proc_start",
+            Kind::ProcExit => "proc_exit",
+            Kind::ProcSpill => "proc_spill",
+            Kind::Other => "other",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Event {
     /// Unix time, seconds.
     pub time: f64,
     pub gpu: Option<usize>,
     pub severity: Severity,
+    #[serde(default)]
+    pub kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     pub text: String,
 }
 
 /// Events between `prev` and `cur`.
 pub fn diff(prev: &Snapshot, cur: &Snapshot) -> Vec<Event> {
     let mut out = Vec::new();
-    let mut ev = |gpu: Option<usize>, severity: Severity, text: String| out.push(Event { time: cur.timestamp, gpu, severity, text });
+    let mut ev = |gpu: usize, kind: Kind, severity: Severity, pid: Option<u32>, text: String| {
+        out.push(Event { time: cur.timestamp, gpu: Some(gpu), severity, kind, pid, text })
+    };
 
     for (i, (a, b)) in prev.gpus.iter().zip(&cur.gpus).enumerate() {
-        let g = Some(i);
         match (&a.error, &b.error) {
-            (None, Some(e)) => ev(g, Severity::Crit, format!("GPU {i}: {e}")),
-            (Some(_), None) => ev(g, Severity::Info, format!("GPU {i} recovered")),
+            (None, Some(e)) => ev(i, Kind::GpuError, Severity::Crit, None, format!("GPU {i}: {e}")),
+            (Some(_), None) => ev(i, Kind::GpuRecovered, Severity::Info, None, format!("GPU {i} recovered")),
             _ => {}
         }
         // Clock limiters worth knowing about, edge-triggered.
@@ -42,32 +85,35 @@ pub fn diff(prev: &Snapshot, cur: &Snapshot) -> Vec<Event> {
         let (was, now) = (notable(&a.throttle), notable(&b.throttle));
         for r in now.iter().filter(|r| !was.contains(r)) {
             let sev = if r.severity() >= 2 { Severity::Crit } else { Severity::Warn };
-            ev(g, sev, format!("GPU {i}: clocks limited by {}", r.label()));
+            ev(i, Kind::Throttle, sev, None, format!("GPU {i}: clocks limited by {}", r.label()));
         }
         for r in was.iter().filter(|r| !now.contains(r)) {
-            ev(g, Severity::Info, format!("GPU {i}: {} cleared", r.label()));
+            ev(i, Kind::ThrottleCleared, Severity::Info, None, format!("GPU {i}: {} cleared", r.label()));
         }
         if a.spill.level != SpillLevel::Spilling && b.spill.level == SpillLevel::Spilling {
             let slow = b.spill.slowdown.filter(|x| *x >= 1.5).map(|x| format!(", ≈{x:.0}× slower")).unwrap_or_default();
-            ev(g, Severity::Crit, format!("GPU {i}: spill started, {}{slow}", b.spill.reason));
+            ev(i, Kind::SpillStart, Severity::Crit, None, format!("GPU {i}: spill started, {}{slow}", b.spill.reason));
         } else if a.spill.level == SpillLevel::Spilling && b.spill.level != SpillLevel::Spilling {
-            ev(g, Severity::Info, format!("GPU {i}: spill ended"));
+            ev(i, Kind::SpillEnd, Severity::Info, None, format!("GPU {i}: spill ended"));
         }
     }
 
-    let key = |p: &crate::model::ProcRow| p.key();
-    for p in cur.processes.iter().filter(|p| !prev.processes.iter().any(|q| key(q) == key(p))) {
-        ev(Some(p.gpu), Severity::Info, format!("GPU {}: {} ({}) started", p.gpu, p.name, p.pid()));
-    }
-    for p in prev.processes.iter().filter(|p| !cur.processes.iter().any(|q| key(q) == key(p))) {
-        ev(Some(p.gpu), Severity::Info, format!("GPU {}: {} ({}) exited", p.gpu, p.name, p.pid()));
-    }
+    let before: HashMap<_, _> = prev.processes.iter().map(|p| (p.key(), p)).collect();
+    let after: HashSet<_> = cur.processes.iter().map(|p| p.key()).collect();
     for p in &cur.processes {
-        let before = prev.processes.iter().find(|q| key(q) == key(p));
-        if p.spilling && !before.is_some_and(|q| q.spilling) {
-            let bytes = p.usage.gpu_mem_shared.map(fmt::bytes).unwrap_or_default();
-            ev(Some(p.gpu), Severity::Crit, format!("GPU {}: {} ({}) spilled {bytes} into system memory", p.gpu, p.name, p.pid()));
+        let (g, pid) = (p.gpu, p.pid());
+        let was = before.get(&p.key());
+        if was.is_none() {
+            ev(g, Kind::ProcStart, Severity::Info, Some(pid), format!("GPU {g}: {} ({pid}) started", p.name));
         }
+        if p.spilling && !was.is_some_and(|q| q.spilling) {
+            let bytes = p.usage.gpu_mem_shared.map(fmt::bytes).unwrap_or_default();
+            ev(g, Kind::ProcSpill, Severity::Crit, Some(pid), format!("GPU {g}: {} ({pid}) spilled {bytes} into system memory", p.name));
+        }
+    }
+    for p in prev.processes.iter().filter(|p| !after.contains(&p.key())) {
+        let (g, pid) = (p.gpu, p.pid());
+        ev(g, Kind::ProcExit, Severity::Info, Some(pid), format!("GPU {g}: {} ({pid}) exited", p.name));
     }
     out
 }
@@ -126,7 +172,7 @@ mod tests {
         let a = snap(1.0, GpuSample::default(), vec![proc(1, false)]);
         let b = snap(2.0, GpuSample::default(), vec![proc(2, false)]);
         let e = diff(&a, &b);
-        assert!(e.iter().any(|e| e.text.contains("(2) started")));
-        assert!(e.iter().any(|e| e.text.contains("(1) exited")));
+        assert!(e.iter().any(|e| e.kind == Kind::ProcStart && e.pid == Some(2)));
+        assert!(e.iter().any(|e| e.kind == Kind::ProcExit && e.text.contains("(1) exited")));
     }
 }

@@ -7,8 +7,6 @@ use super::Backend;
 use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Vendor};
 use crate::os::windows::{AdapterDesc, Luid, adapter_descs, pdh_sample};
 
-const MICROSOFT: u32 = 0x1414; // Basic Render Driver / WARP
-
 struct Adapter {
     luid: Luid,
     info: GpuInfo,
@@ -36,13 +34,12 @@ impl Wddm {
         let all = crate::brand::env("WDDM_ALL").is_some();
         let adapters: Vec<Adapter> = adapter_descs()
             .into_iter()
-            .filter(|d| d.vendor_id != Some(MICROSOFT) && !d.name.is_empty() && !d.name.contains("Microsoft Basic"))
+            .filter(AdapterDesc::is_gpu)
             .filter(|d| all || d.pci.is_none_or(|p| !skip.contains(&p)))
             .map(|d| {
                 let mut info = GpuInfo::new(vendor_of(&d), d.name.clone());
                 info.pci_bus_id = d.pci.map(|(b, dev, f)| format!("00000000:{b:02X}:{dev:02X}.{f:X}"));
-                // Integrated GPUs get a small carve-out and live in shared memory.
-                info.integrated = d.dedicated < (1 << 30);
+                info.integrated = d.is_integrated();
                 info.memory_total = Some(if info.integrated { d.shared_system } else { d.dedicated }).filter(|&m| m > 0);
                 Adapter { luid: d.luid, info }
             })
@@ -80,13 +77,18 @@ impl Backend for Wddm {
                 let mut processes: Vec<GpuProcess> = pdh
                     .procs
                     .iter()
-                    .filter(|((luid, _), p)| *luid == a.luid && (p.dedicated.unwrap_or(0) > 0 || p.util.unwrap_or(0.0) > 0.0))
+                    .filter(|((luid, _), p)| *luid == a.luid && p.is_active())
                     .map(|(&(_, pid), p)| GpuProcess {
                         pid,
                         scope: PidScope::Local,
                         kind: ProcKind::Graphics,
+                        // An integrated GPU's memory is mostly the shared pool.
                         // The counters occasionally report garbage (terabytes).
-                        gpu_mem: p.dedicated.filter(|&b| a.info.memory_total.is_none_or(|t| a.info.integrated || b <= t)),
+                        gpu_mem: if a.info.integrated {
+                            p.shared.map(|s| s + p.dedicated.unwrap_or(0))
+                        } else {
+                            p.dedicated.filter(|&b| a.info.memory_total.is_none_or(|t| b <= t))
+                        },
                         // Shared usage only means spill on a discrete GPU.
                         gpu_mem_shared: if a.info.integrated { None } else { p.shared },
                         sm_util: p.util,

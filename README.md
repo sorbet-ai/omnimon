@@ -56,8 +56,9 @@ workload is spilling out of VRAM.
   `--connect box` from your laptop for the full UI (read-only; no auth, so
   keep it on a trusted network).
 - **Alerts**: `alert_command` in the config runs on critical events (spill,
-  thermal, errors) with the event in `NVTUI_EVENT` / `NVTUI_SEVERITY` /
-  `NVTUI_GPU`, e.g. `notify-send` or `curl` to a webhook.
+  thermal, errors) with the event in `NVTUI_EVENT` / `NVTUI_KIND` /
+  `NVTUI_SEVERITY` / `NVTUI_GPU` / `NVTUI_PID`, e.g. `notify-send` or `curl`
+  to a webhook. It runs under `sh -c` (Windows: `cmd /C`, so `%NVTUI_EVENT%`).
 - **Containers and energy**: container/pod id per process (from cgroups);
   session energy per GPU and each process's estimated share
   (`price_per_kwh` in the config adds cost).

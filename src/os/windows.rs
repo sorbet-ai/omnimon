@@ -349,10 +349,43 @@ pub struct AdapterDesc {
     pub dedicated: u64,
     /// System memory the adapter may use.
     pub shared_system: u64,
+    /// KMTQAITYPE_ADAPTERTYPE flags (None if the query failed).
+    pub flags: Option<u32>,
+}
+
+/// D3DKMT_ADAPTERTYPE bits.
+pub mod adapter_flags {
+    pub const RENDER: u32 = 1 << 0;
+    pub const SOFTWARE: u32 = 1 << 2;
+    pub const HYBRID_DISCRETE: u32 = 1 << 4;
+    pub const HYBRID_INTEGRATED: u32 = 1 << 5;
+    pub const INDIRECT_DISPLAY: u32 = 1 << 6;
+}
+
+impl AdapterDesc {
+    /// A real GPU that renders (not WARP, a virtual display or an NPU).
+    /// GPU-P adapters inside VMs are paravirtualized but real, so they stay.
+    pub fn is_gpu(&self) -> bool {
+        use adapter_flags::*;
+        let flags_ok = self.flags.is_none_or(|f| f & RENDER != 0 && f & (SOFTWARE | INDIRECT_DISPLAY) == 0);
+        flags_ok && self.vendor_id != Some(0x1414) && !self.name.is_empty() && !self.name.contains("Microsoft Basic")
+    }
+
+    /// Integrated GPUs live in system memory: a hybrid laptop says so, and
+    /// otherwise a tiny dedicated carve-out gives it away.
+    pub fn is_integrated(&self) -> bool {
+        use adapter_flags::*;
+        match self.flags {
+            Some(f) if f & HYBRID_INTEGRATED != 0 => true,
+            Some(f) if f & HYBRID_DISCRETE != 0 => false,
+            _ => self.dedicated < (1 << 30),
+        }
+    }
 }
 
 const KMTQAITYPE_GETSEGMENTSIZE: u32 = 3;
 const KMTQAITYPE_ADAPTERREGISTRYINFO: u32 = 8;
+const KMTQAITYPE_ADAPTERTYPE: u32 = 15;
 const KMTQAITYPE_PHYSICALADAPTERDEVICEIDS: u32 = 31;
 
 #[repr(C)]
@@ -438,49 +471,12 @@ pub fn adapter_descs() -> Vec<AdapterDesc> {
                 d.vendor_id = Some(ids.vendor_id);
                 d.device_id = Some(ids.device_id);
             }
-            cl(&a.h_adapter);
-            out.push(d);
-        }
-    }
-    out
-}
-
-/// Enumerate WDDM adapters: LUID -> PCI location.
-fn adapters() -> HashMap<Luid, (u32, u32, u32)> {
-    let mut out = HashMap::new();
-    unsafe {
-        let Ok(lib) = Library::new("gdi32.dll") else { return out };
-        type Enum = unsafe extern "system" fn(*mut EnumAdapters2) -> i32;
-        type Query = unsafe extern "system" fn(*const QueryAdapterInfo) -> i32;
-        type Close = unsafe extern "system" fn(*const u32) -> i32;
-        let (Ok(en), Ok(q), Ok(cl)) = (
-            lib.get::<Enum>(b"D3DKMTEnumAdapters2\0"),
-            lib.get::<Query>(b"D3DKMTQueryAdapterInfo\0"),
-            lib.get::<Close>(b"D3DKMTCloseAdapter\0"),
-        ) else {
-            return out;
-        };
-        let mut e = EnumAdapters2 { num: 0, adapters: std::ptr::null_mut() };
-        if en(&mut e) != 0 || e.num == 0 {
-            return out;
-        }
-        let mut list = vec![AdapterInfo::default(); e.num as usize];
-        e.adapters = list.as_mut_ptr();
-        if en(&mut e) != 0 {
-            return out;
-        }
-        for a in &list[..(e.num as usize).min(list.len())] {
-            let mut addr = AdapterAddress::default();
-            let qi = QueryAdapterInfo {
-                h_adapter: a.h_adapter,
-                kind: KMTQAITYPE_ADAPTERADDRESS,
-                data: &mut addr as *mut _ as *mut c_void,
-                size: std::mem::size_of::<AdapterAddress>() as u32,
-            };
-            if q(&qi) == 0 {
-                out.insert((a.luid_high, a.luid_low), (addr.bus, addr.device, addr.function));
+            let mut flags = 0u32;
+            if query(a.h_adapter, KMTQAITYPE_ADAPTERTYPE, &mut flags as *mut _ as *mut c_void, std::mem::size_of::<u32>()) {
+                d.flags = Some(flags);
             }
             cl(&a.h_adapter);
+            out.push(d);
         }
     }
     out
@@ -502,22 +498,19 @@ pub struct Enricher {
     totals: Vec<Option<u64>>,
 }
 
-// SAFETY: PDH handles are only used from the sampler thread.
-unsafe impl Send for Enricher {}
-
 impl Enricher {
     pub fn new(gpus: &[GpuInfo]) -> Option<Self> {
         pdh_cache()?;
-        let map = adapters();
+        let descs = adapter_descs();
         let luids: Vec<Option<Luid>> = gpus
             .iter()
             .map(|g| {
                 let loc = g.pci_bus_id.as_deref().and_then(parse_bus_id)?;
-                map.iter().find(|(_, a)| **a == loc).map(|(l, _)| *l)
+                descs.iter().find(|d| d.pci == Some(loc)).map(|d| d.luid)
             })
             .collect();
         if luids.iter().all(Option::is_none) {
-            log::debug!("no GPU matched a WDDM adapter ({} adapters)", map.len());
+            log::debug!("no GPU matched a WDDM adapter ({} adapters)", descs.len());
         }
         Some(Enricher { luids, totals: gpus.iter().map(|g| g.memory_total).collect() })
     }
@@ -530,6 +523,14 @@ impl Enricher {
             }
         }
         merge(&sample.procs, &self.luids, &self.totals, procs);
+    }
+}
+
+impl ProcUsage {
+    /// Worth listing: holds VRAM, a real amount of shared memory, or is busy.
+    /// (Every desktop app maps a few MiB of shared memory.)
+    pub fn is_active(&self) -> bool {
+        self.dedicated.unwrap_or(0) > 0 || self.shared.unwrap_or(0) > (16 << 20) || self.util.unwrap_or(0.0) > 0.0
     }
 }
 
@@ -552,8 +553,7 @@ fn merge(usage: &HashMap<(Luid, u32), ProcUsage>, luids: &[Option<Luid>], totals
     }
     for (&(luid, pid), u) in usage {
         let Some(gpu) = luids.iter().position(|l| *l == Some(luid)) else { continue };
-        let busy = u.dedicated.unwrap_or(0) > 0 || u.shared.unwrap_or(0) > (16 << 20) || u.util.unwrap_or(0.0) > 0.0;
-        if seen.contains(&(gpu, pid)) || !busy {
+        if seen.contains(&(gpu, pid)) || !u.is_active() {
             continue;
         }
         procs.push((
@@ -576,6 +576,21 @@ fn merge(usage: &HashMap<(Luid, u32), ProcUsage>, luids: &[Option<Luid>], totals
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_classification() {
+        use adapter_flags::*;
+        let gpu = |flags, dedicated| AdapterDesc { name: "GPU".into(), flags, dedicated, ..Default::default() };
+        assert!(gpu(Some(RENDER), 24 << 30).is_gpu());
+        assert!(!gpu(Some(RENDER | SOFTWARE), 0).is_gpu(), "WARP");
+        assert!(!gpu(Some(RENDER | INDIRECT_DISPLAY), 0).is_gpu(), "virtual display");
+        assert!(!gpu(Some(0), 0).is_gpu(), "compute-only (NPU)");
+        assert!(gpu(None, 0).is_gpu(), "flags unknown: keep");
+        assert!(gpu(Some(RENDER), 128 << 20).is_integrated());
+        assert!(gpu(Some(RENDER | HYBRID_INTEGRATED), 4 << 30).is_integrated());
+        assert!(!gpu(Some(RENDER | HYBRID_DISCRETE), 512 << 20).is_integrated());
+        assert!(!gpu(Some(RENDER), 8 << 30).is_integrated());
+    }
 
     #[test]
     fn instance_names() {
