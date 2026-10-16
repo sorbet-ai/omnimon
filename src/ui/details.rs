@@ -182,5 +182,33 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
     };
     let title = |x: &str| Line::from(vec![s(format!(" {x} "), t.title).bold(), s(format!("GPU {i} "), t.dim)]);
     f.render_widget(Paragraph::new(kv(device)).wrap(Wrap { trim: false }).block(block(t, false).title_top(title("Device"))), l);
-    f.render_widget(Paragraph::new(kv(live)).wrap(Wrap { trim: false }).block(block(t, false).title_top(title("Live"))), r);
+    // Diagnosis above the live values.
+    let recent = app.hist.gpus.get(i).map(|h| {
+        let w: Vec<f64> = h.util.window(60, app.hist.back).iter().flatten().map(|v| v * 100.0).collect();
+        crate::diagnose::Recent { util_avg: (!w.is_empty()).then(|| w.iter().sum::<f64>() / w.len() as f64), samples: w.len() }
+    });
+    let procs: Vec<&crate::model::ProcRow> = app.procs().iter().filter(|p| p.gpu == i).collect();
+    let findings = crate::diagnose::diagnose(g, sm, &procs, recent.unwrap_or_default());
+    let diag: Vec<Line> = if findings.is_empty() {
+        vec![Line::from(s("nothing wrong found", t.ok))]
+    } else {
+        findings
+            .iter()
+            .map(|f| {
+                let c = match f.severity {
+                    crate::events::Severity::Crit => t.crit,
+                    crate::events::Severity::Warn => t.warn,
+                    crate::events::Severity::Info => t.accent,
+                };
+                Line::from(vec![s("■ ", c), s(format!("{}: ", f.title), c).bold(), s(f.detail.as_str(), t.fg)])
+            })
+            .collect()
+    };
+    let diag_h = (diag.len() as u16 * 2 + 2).min(r.height / 2).max(3);
+    let [dr, lr] = Layout::vertical([Constraint::Length(diag_h), Constraint::Fill(1)]).areas(r);
+    f.render_widget(
+        Paragraph::new(diag).wrap(Wrap { trim: false }).block(block(t, !findings.is_empty()).title_top(title("Diagnosis"))),
+        dr,
+    );
+    f.render_widget(Paragraph::new(kv(live)).wrap(Wrap { trim: false }).block(block(t, false).title_top(title("Live"))), lr);
 }

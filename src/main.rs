@@ -2,6 +2,7 @@ mod backend;
 mod brand;
 mod collector;
 mod config;
+mod diagnose;
 mod events;
 mod fmt;
 mod host;

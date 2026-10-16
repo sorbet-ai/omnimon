@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::brand::{APP_NAME, APP_VERSION};
 use crate::fmt;
-use crate::model::{PidMapping, ProcRow, Snapshot, SpillLevel, SystemInfo};
+use crate::model::{PidMapping, ProcRow, Snapshot, SystemInfo};
 
 /// Bump whenever a JSON field changes name or meaning.
 pub const SCHEMA: u32 = 2;
@@ -99,15 +99,14 @@ pub fn once(info: &SystemInfo, snap: &Snapshot, color: bool) {
             power,
             procs_inline(snap, g.index, &a),
         );
-        match s.spill.level {
-            SpillLevel::Spilling => {
-                let slow = s.spill.slowdown.map(|x| format!(", ≈{x:.0}× slower")).unwrap_or_default();
-                let _ = writeln!(out, "    {} {}{slow}", a.c("1;31", "SPILL"), s.spill.reason);
-            }
-            SpillLevel::Pressure => {
-                let _ = writeln!(out, "    {} {}", a.c("1;33", "pressure"), s.spill.reason);
-            }
-            SpillLevel::None => {}
+        let procs: Vec<&ProcRow> = snap.processes.iter().filter(|p| p.gpu == g.index).collect();
+        for f in crate::diagnose::diagnose(g, s, &procs, crate::diagnose::Recent::default()) {
+            let code = match f.severity {
+                crate::events::Severity::Crit => "1;31",
+                crate::events::Severity::Warn => "1;33",
+                crate::events::Severity::Info => "1;36",
+            };
+            let _ = writeln!(out, "    {} {}", a.c(code, format!("{}:", f.title)), f.detail);
         }
         if let Some(e) = &s.error {
             let _ = writeln!(out, "    {}", a.c("1;31", e));
