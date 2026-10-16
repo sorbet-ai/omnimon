@@ -2,7 +2,7 @@
 # Binary name, window title, env-var prefix (OMNIMON_*), config dir and
 # metric namespace are all derived from `name` (see src/brand.rs).
 name = "omnimon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.91"
 description = "Terminal monitor for GPUs (NVIDIA, Apple, AMD, Intel), the processes using them and the machine around them. One binary for Linux, Windows and macOS; works in containers and WSL."
