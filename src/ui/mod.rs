@@ -11,6 +11,7 @@ mod input;
 mod overview;
 mod popups;
 mod procs;
+mod recorder;
 mod theme;
 mod timeline;
 mod widgets;
@@ -210,7 +211,13 @@ struct Hit {
 
 struct App {
     info: SystemInfo,
+    /// The snapshot on screen: the newest, or a past one while rewinding.
     snap: Option<Snapshot>,
+    /// Recent snapshots, oldest first (rewind buffer).
+    past: std::collections::VecDeque<Snapshot>,
+    /// How many snapshots back from the newest we're showing (0 = live).
+    rewind: usize,
+    recorder: Option<recorder::Recorder>,
     hist: History,
     tab: Tab,
     sel_gpu: usize,
@@ -260,6 +267,9 @@ impl App {
         App {
             info,
             snap: None,
+            past: Default::default(),
+            rewind: 0,
+            recorder: None,
             hist: History::default(),
             tab: Tab::Overview,
             sel_gpu: 0,
@@ -335,14 +345,47 @@ impl App {
         gfx::ChartCtx { gfx: &self.gfx, style: self.chart_style, version: self.version, theme: self.theme, bg }
     }
 
+    /// Seed history and the rewind buffer from a previous session's recording.
+    fn replay(&mut self, past: Vec<Snapshot>) {
+        for s in past {
+            self.hist.push(&self.info, &s);
+            self.past.push_back(s);
+        }
+        self.snap = self.past.back().cloned();
+        self.refresh_view();
+    }
+
     fn ingest(&mut self, s: Snapshot) {
+        if let Some(r) = &mut self.recorder
+            && r.append(&s)
+        {
+            r.rewrite(self.past.iter());
+        }
+        self.past.push_back(s.clone());
+        if self.past.len() > recorder::KEEP {
+            self.past.pop_front();
+        }
         self.hist.push(&self.info, &s);
         self.events.extend(s.events.iter().cloned());
         while self.events.len() > 2000 {
             self.events.pop_front();
         }
         self.tagged.retain(|k| s.processes.iter().any(|p| p.key() == *k));
-        self.snap = Some(s);
+        self.version += 1;
+        if self.rewind > 0 {
+            // Stay on the same moment while new data arrives.
+            self.set_rewind(self.rewind + 1);
+        } else {
+            self.snap = Some(s);
+            self.refresh_view();
+        }
+    }
+
+    fn set_rewind(&mut self, n: usize) {
+        let n = n.min(self.past.len().saturating_sub(1));
+        self.rewind = n;
+        self.hist.back = n;
+        self.snap = self.past.get(self.past.len().saturating_sub(1 + n)).cloned();
         self.version += 1;
         self.refresh_view();
     }
@@ -552,6 +595,11 @@ impl App {
             }
             Action::Slower => self.set_interval(sampler, false),
             Action::Faster => self.set_interval(sampler, true),
+            Action::RewindBack => self.set_rewind(self.rewind + 10),
+            Action::RewindBackFar => self.set_rewind(self.rewind + 60),
+            Action::RewindForward => self.set_rewind(self.rewind.saturating_sub(10)),
+            Action::RewindForwardFar => self.set_rewind(self.rewind.saturating_sub(60)),
+            Action::Live => self.set_rewind(0),
         }
     }
 
@@ -790,6 +838,10 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, opts: &Ui
         forced => gfx::Gfx::detect(Some(forced)),
     };
     let mut app = App::new(info, interval, opts, &cfg, gfx);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let (rec, past) = recorder::Recorder::open(&app.info, now);
+    app.recorder = Some(rec);
+    app.replay(past);
     if app.chart_ctx().pixels() {
         app.toast(format!("charts: pixels ({}) · press G if they stay empty", app.gfx.protocol_name()), false);
     }

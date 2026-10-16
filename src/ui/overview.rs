@@ -226,8 +226,10 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
         let ctx = app.chart_ctx();
         let n = ctx.samples(chart.width);
         let Some(h) = app.hist.gpus.get(i) else { return };
-        let series =
-            [Series { data: h.util.tail(n), grad: t.util, down: false }, Series { data: h.mem.tail(n), grad: mem_grad, down: true }];
+        let series = [
+            Series { data: app.hist.tail(&h.util, n), grad: t.util, down: false },
+            Series { data: app.hist.tail(&h.mem, n), grad: mem_grad, down: true },
+        ];
         ctx.draw(f, chart, 1 + i as u32, &series);
         // Text over a pixel image would punch holes in it; the values are in the bars.
         if ctx.pixels() {
@@ -306,7 +308,7 @@ fn compact(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         f.render_widget(Paragraph::new(s(sm.power.map(|p| format!(" {p:>4.0}W")).unwrap_or(" N/A".into()), pc)), cols[9]);
         if let Some(h) = app.hist.gpus.get(i) {
             let spark = Rect { x: cols[10].x + 1, width: cols[10].width.saturating_sub(1), ..cols[10] };
-            f.render_widget(Spark { data: h.util.tail(spark.width as usize), grad: t.util }, spark);
+            f.render_widget(Spark { data: app.hist.tail(&h.util, spark.width as usize), grad: t.util }, spark);
         }
     }
 }
@@ -357,7 +359,7 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
     }
     if x + 12 < end {
         let rest = Rect { x: x + 1, width: end - x - 1, ..cores };
-        f.render_widget(Spark { data: app.hist.cpu.tail(rest.width as usize), grad: t.cpu }, rest);
+        f.render_widget(Spark { data: app.hist.tail(&app.hist.cpu, rest.width as usize), grad: t.cpu }, rest);
     }
 
     // Memory + swap.
@@ -407,7 +409,7 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
         let max = r.iter().flatten().copied().fold(1.0f64, f64::max);
         r.iter().map(|v| v.map(|x| x / max)).collect::<Vec<_>>()
     };
-    let rx = scaled(app.hist.net_rx.tail(nspark.width as usize));
+    let rx = scaled(app.hist.tail(&app.hist.net_rx, nspark.width as usize));
     f.render_widget(Spark { data: &rx, grad: t.mem }, nspark);
     f.render_widget(Paragraph::new(s(" DSK", t.dim)), dl);
     f.render_widget(
@@ -419,6 +421,6 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
         ])),
         dval,
     );
-    let disk = scaled(app.hist.disk.tail(dspark.width as usize));
+    let disk = scaled(app.hist.tail(&app.hist.disk, dspark.width as usize));
     f.render_widget(Spark { data: &disk, grad: t.power }, Rect { x: dspark.x + 1, width: dspark.width.saturating_sub(1), ..dspark });
 }

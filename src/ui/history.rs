@@ -17,8 +17,10 @@ impl Ring {
             self.0.drain(..self.0.len() - HISTORY);
         }
     }
-    pub fn tail(&self, n: usize) -> &[Option<f64>] {
-        &self.0[self.0.len().saturating_sub(n)..]
+    /// `n` samples ending `back` samples before the newest.
+    pub fn window(&self, n: usize, back: usize) -> &[Option<f64>] {
+        let end = self.0.len().saturating_sub(back);
+        &self.0[end.saturating_sub(n)..end]
     }
 }
 
@@ -53,11 +55,26 @@ pub struct History {
     pub net_tx: Ring,
     pub disk: Ring,
     pub procs: HashMap<(usize, u32), ProcHist>,
+    /// Rewind offset in samples (0 = live); charts end here.
+    pub back: usize,
+    last_time: Option<f64>,
 }
 
 impl History {
     pub fn push(&mut self, info: &SystemInfo, s: &Snapshot) {
         self.gpus.resize_with(info.gpus.len(), GpuHist::default);
+        // A gap in time (the app wasn't running) shows as a break in the charts.
+        if self.last_time.is_some_and(|t| s.timestamp - t > 10.0) {
+            for h in &mut self.gpus {
+                for r in [&mut h.util, &mut h.mem, &mut h.power, &mut h.temp, &mut h.clock, &mut h.rx, &mut h.tx] {
+                    r.push(None);
+                }
+            }
+            for r in [&mut self.cpu, &mut self.net_rx, &mut self.net_tx, &mut self.disk] {
+                r.push(None);
+            }
+        }
+        self.last_time = Some(s.timestamp);
         for ((h, g), gi) in self.gpus.iter_mut().zip(&s.gpus).zip(&info.gpus) {
             h.util.push(g.util_gpu.map(|v| v as f64 / 100.0));
             h.mem.push(g.mem_frac());
@@ -90,6 +107,11 @@ impl History {
         self.procs.retain(|_, h| std::mem::take(&mut h.seen));
     }
 
+    /// The last `n` samples of `r` as of the rewind position.
+    pub fn tail<'a>(&self, r: &'a Ring, n: usize) -> &'a [Option<f64>] {
+        r.window(n, self.back)
+    }
+
     /// Power as a fraction of the limit, or of the peak seen if there's no limit.
     pub fn power_frac(&self, i: usize, s: &GpuSample, limit_max: Option<f64>) -> Option<f64> {
         power_frac(s, limit_max, self.gpus.get(i)?.peak_power)
@@ -112,8 +134,10 @@ mod tests {
             r.push(Some(i as f64));
         }
         assert!(r.0.len() <= HISTORY * 2);
-        assert_eq!(r.tail(2), &[Some((HISTORY * 2 + 8) as f64), Some((HISTORY * 2 + 9) as f64)]);
-        assert_eq!(Ring::default().tail(5).len(), 0);
+        assert_eq!(r.window(2, 0), &[Some((HISTORY * 2 + 8) as f64), Some((HISTORY * 2 + 9) as f64)]);
+        assert_eq!(Ring::default().window(5, 0).len(), 0);
+        assert_eq!(r.window(2, 1), &[Some((HISTORY * 2 + 7) as f64), Some((HISTORY * 2 + 8) as f64)]);
+        assert_eq!(r.window(3, usize::MAX).len(), 0);
     }
 
     #[test]

@@ -116,13 +116,13 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             .title_top(Line::from(s(format!(" {} ", c.value), t.fg).bold()).right_aligned());
         let inner = b.inner(cell);
         let w = ctx.samples(inner.width);
-        let raw = c.data.tail(w);
+        let raw = app.hist.tail(c.data, w);
         let secs = (w as f64 * app.interval.as_secs_f64()) as u64;
         let b = b.title_bottom(Line::from(s(format!(" {} ", fmt::duration(secs)), t.faint)));
         let slot = 100 + (i as u32) * 10 + k as u32;
         match c.mirror {
             Some((m, grad2)) => {
-                let mraw = m.tail(w);
+                let mraw = app.hist.tail(m, w);
                 let max = raw.iter().chain(mraw).flatten().copied().fold(1.0f64, f64::max);
                 let norm = |v: &[Option<f64>]| v.iter().map(|x| x.map(|x| x / max)).collect::<Vec<_>>();
                 let (up, down) = (norm(raw), norm(mraw));

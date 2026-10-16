@@ -209,7 +209,7 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     let chart = Rect { y: top, height: bottom - top, ..inner };
     let [c1, c2] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(2).areas(chart);
     let ctx = app.chart_ctx();
-    let mem = h.mem.tail(ctx.samples(c1.width));
+    let mem = app.hist.tail(&h.mem, ctx.samples(c1.width));
     let peak = mem.iter().flatten().copied().fold(0.0f64, f64::max);
     let scale = app.sample(p.gpu).and_then(|g| g.mem_total).map(|v| v as f64).unwrap_or(peak).max(1.0);
     let memn: Vec<Option<f64>> = mem.iter().map(|v| v.map(|x| x / scale)).collect();
@@ -218,5 +218,5 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     label(f, c2, "gpu utilization".into());
     let body = |a: Rect| Rect { y: a.y + 1, height: a.height.saturating_sub(1), ..a };
     ctx.draw(f, body(c1), 900, &[Series { data: &memn, grad: t.mem, down: false }]);
-    ctx.draw(f, body(c2), 901, &[Series { data: h.sm.tail(ctx.samples(c2.width)), grad: t.util, down: false }]);
+    ctx.draw(f, body(c2), 901, &[Series { data: app.hist.tail(&h.sm, ctx.samples(c2.width)), grad: t.util, down: false }]);
 }

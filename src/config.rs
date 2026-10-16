@@ -37,6 +37,23 @@ pub fn path() -> Option<PathBuf> {
     Some(base.join(APP_NAME).join("config.json"))
 }
 
+/// Where recorded history lives: the platform's local state directory.
+pub fn state_dir() -> Option<PathBuf> {
+    if let Some(p) = crate::brand::env("STATE_DIR") {
+        return Some(PathBuf::from(p));
+    }
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+    }?;
+    Some(base.join(APP_NAME))
+}
+
 pub fn load() -> Config {
     path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }

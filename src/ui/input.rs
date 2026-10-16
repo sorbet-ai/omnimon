@@ -40,6 +40,11 @@ pub enum Action {
     Pause,
     Slower,
     Faster,
+    RewindBack,
+    RewindForward,
+    RewindBackFar,
+    RewindForwardFar,
+    Live,
 }
 
 impl Action {
@@ -70,6 +75,9 @@ impl Action {
             Action::ChartStyle => "chart style: pixels · blocks · braille",
             Action::Pause => "pause sampling",
             Action::Slower | Action::Faster => "slower / faster refresh",
+            Action::RewindBack | Action::RewindForward => "rewind / forward 10 samples",
+            Action::RewindBackFar | Action::RewindForwardFar => "rewind / forward 60 samples",
+            Action::Live => "back to live",
         }
     }
 }
@@ -106,6 +114,11 @@ const DEFAULTS: &[(Action, &[&str])] = &[
     (Action::Pause, &["p"]),
     (Action::Slower, &["+", "="]),
     (Action::Faster, &["-", "_"]),
+    (Action::RewindBack, &["<", ","]),
+    (Action::RewindForward, &[">", "."]),
+    (Action::RewindBackFar, &["{"]),
+    (Action::RewindForwardFar, &["}"]),
+    (Action::Live, &["0"]),
     (Action::Quit, &["q", "ctrl-c"]),
 ];
 
