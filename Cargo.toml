@@ -8,6 +8,13 @@ edition = "2024"
 rust-version = "1.91"
 description = "One terminal monitor for every GPU (NVIDIA, Apple, AMD, Intel), the processes using them and the machine around them. Single binary; works in containers, WSL and Windows."
 license = "MIT"
+repository = "https://github.com/sorbet-ai/omnimon"
+homepage = "https://github.com/sorbet-ai/omnimon"
+readme = "README.md"
+keywords = ["gpu", "monitor", "nvidia", "tui", "nvtop"]
+categories = ["command-line-utilities", "hardware-support"]
+# Keep the published crate to what builds and tests it.
+include = ["src/**/*", "tests/fixtures/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "rustfmt.toml"]
 
 [dependencies]
 anyhow = "1.0.104"

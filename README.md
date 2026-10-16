@@ -119,7 +119,8 @@ signal the wrong process. **WSL2**: the driver exposes no process list (even
 ## Install / build
 
 ```sh
-cargo build --release                 # native
+cargo install omnimon                 # from crates.io (Rust 1.91+)
+cargo build --release                 # from source
 scripts/build-linux.sh                # portable Linux x86_64 + aarch64 (glibc >= 2.17) via Docker + cargo-zigbuild
 scripts/build-windows.sh              # Windows release into dist/
 ```
