@@ -393,6 +393,10 @@ impl App {
         self.refresh_view();
     }
 
+    fn scroll_events(&mut self, d: isize) {
+        self.events_scroll = self.events_scroll.saturating_add_signed(d).min(self.store.events.len().saturating_sub(1));
+    }
+
     fn toast(&mut self, msg: impl Into<String>, err: bool) {
         self.toast = Some((msg.into(), Instant::now(), err));
     }
@@ -505,15 +509,12 @@ impl App {
             Action::Charts => self.tab = Tab::Charts,
             Action::Details => self.tab = Tab::Details,
             Action::Events => self.tab = Tab::Events,
-            Action::Up | Action::Down | Action::PageUp | Action::PageDown if scroll_events => {
-                let d: isize = match a {
-                    Action::Up => -1,
-                    Action::Down => 1,
-                    Action::PageUp => -20,
-                    _ => 20,
-                };
-                self.events_scroll = self.events_scroll.saturating_add_signed(d).min(self.store.events.len().saturating_sub(1));
-            }
+            Action::Up | Action::Down | Action::PageUp | Action::PageDown if scroll_events => self.scroll_events(match a {
+                Action::Up => -1,
+                Action::Down => 1,
+                Action::PageUp => -20,
+                _ => 20,
+            }),
             Action::Up => self.move_sel(-1),
             Action::Down => self.move_sel(1),
             Action::PageUp => self.move_sel(-10),
@@ -705,10 +706,12 @@ impl App {
         let Some(Popup::Tune { gpu, watts }) = &mut self.popup else { return };
         let g = self.info.gpus.get(*gpu);
         let (lo, hi) = (g.and_then(|g| g.power_limit_min).unwrap_or(0.0), g.and_then(|g| g.power_limit_max).unwrap_or(f64::MAX));
-        let step = if k.modifiers.contains(KeyModifiers::SHIFT) { 25.0 } else { 5.0 };
+        // Shift+arrow or H/L for big steps (Shift is how '+' is typed, so it can't mean "big" there).
+        let big = matches!(k.code, KeyCode::Left | KeyCode::Right) && k.modifiers.contains(KeyModifiers::SHIFT);
+        let step = if big || matches!(k.code, KeyCode::Char('H' | 'L')) { 25.0 } else { 5.0 };
         match k.code {
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-') => *watts = (*watts - step).max(lo),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') => *watts = (*watts + step).min(hi),
+            KeyCode::Left | KeyCode::Char('h' | 'H' | '-') => *watts = (*watts - step).max(lo),
+            KeyCode::Right | KeyCode::Char('l' | 'L' | '+' | '=') => *watts = (*watts + step).min(hi),
             KeyCode::Enter | KeyCode::Char('d') => {
                 let cmd = if k.code == KeyCode::Enter {
                     crate::backend::Tune::PowerLimit(Some(*watts))
@@ -799,6 +802,8 @@ impl App {
     fn on_mouse(&mut self, m: MouseEvent) {
         let inside = |r: Rect| m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height;
         match m.kind {
+            MouseEventKind::ScrollDown if self.tab == Tab::Events => self.scroll_events(3),
+            MouseEventKind::ScrollUp if self.tab == Tab::Events => self.scroll_events(-3),
             MouseEventKind::ScrollDown => self.move_sel(3),
             MouseEventKind::ScrollUp => self.move_sel(-3),
             MouseEventKind::Down(MouseButton::Left) => {
@@ -865,9 +870,15 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
         let mut dirty = true;
         let mut last_draw = Instant::now();
         loop {
-            while let Ok(s) = sampler.rx.try_recv() {
-                app.ingest(s);
-                dirty = true;
+            loop {
+                match sampler.rx.try_recv() {
+                    Ok(s) => {
+                        app.ingest(s);
+                        dirty = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => anyhow::bail!("the sampler thread stopped"),
+                }
             }
             for r in std::mem::take(&mut *sampler.ctl.results.lock().unwrap()) {
                 match r {

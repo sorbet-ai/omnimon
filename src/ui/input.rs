@@ -160,7 +160,8 @@ fn parse_key(s: &str) -> Option<Key> {
             if chars.next().is_some() {
                 return None;
             }
-            KeyCode::Char(c)
+            // Terminals report ctrl+letter in lowercase.
+            KeyCode::Char(if ctrl { c.to_ascii_lowercase() } else { c })
         }
     };
     Some(Key { code, ctrl })
@@ -197,8 +198,19 @@ impl Keymap {
     }
 
     pub fn action(&self, k: &KeyEvent) -> Option<Action> {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        self.map.get(&Key { code: k.code, ctrl }).copied()
+        let (alt, mut ctrl) = (k.modifiers.contains(KeyModifiers::ALT), k.modifiers.contains(KeyModifiers::CONTROL));
+        if alt && ctrl && matches!(k.code, KeyCode::Char(_)) {
+            // AltGr (reported as ctrl+alt on Windows) types characters like '[' or '@'.
+            ctrl = false;
+        } else if alt {
+            // Alt combinations belong to the terminal or window manager.
+            return None;
+        }
+        let code = match k.code {
+            KeyCode::Char(c) if ctrl => KeyCode::Char(c.to_ascii_lowercase()),
+            c => c,
+        };
+        self.map.get(&Key { code, ctrl }).copied()
     }
 
     pub fn label(&self, a: Action) -> &str {
@@ -261,6 +273,10 @@ mod tests {
         assert_eq!(km.action(&ev(KeyCode::F(9))), Some(Action::Kill));
         assert_eq!(km.action(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Action::Quit));
         assert_eq!(km.action(&ev(KeyCode::Char('c'))), Some(Action::FullCommand));
+        assert_eq!(km.action(&KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Action::Quit));
+        assert_eq!(km.action(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT)), None);
+        assert_eq!(km.action(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT | KeyModifiers::CONTROL)), Some(Action::Quit));
+        assert_eq!(parse_key("ctrl-C"), parse_key("ctrl-c"));
 
         let mut o = HashMap::new();
         o.insert(Action::Kill, vec!["x".to_string()]);

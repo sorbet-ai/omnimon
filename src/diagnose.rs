@@ -26,8 +26,9 @@ pub struct Recent {
 pub fn diagnose(info: &GpuInfo, s: &GpuSample, procs: &[&ProcRow], recent: Recent) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut add = |severity, title: &str, detail: String| out.push(Finding { severity, title: title.into(), detail });
-    let util = s.util_gpu.unwrap_or(0.0) as f64;
-    let busy = util >= 40.0;
+    // Rules about how busy the GPU is need a utilization reading.
+    let util = s.util_gpu.map(f64::from);
+    let busy = util.is_some_and(|u| u >= 40.0);
 
     if let Some(e) = &s.error {
         add(Severity::Crit, "GPU error", e.clone());
@@ -87,18 +88,18 @@ pub fn diagnose(info: &GpuInfo, s: &GpuSample, procs: &[&ProcRow], recent: Recen
         }
         if let (Some(c), Some(m)) = (s.clock_sm.or(s.clock_graphics), info.max_clock_sm.or(info.max_clock_graphics)) {
             let quiet = s.throttle.iter().all(|r| r.severity() == 0);
-            if util >= 80.0 && (c as f64) < 0.5 * m as f64 && quiet {
+            if util.is_some_and(|u| u >= 80.0) && (c as f64) < 0.5 * m as f64 && quiet {
                 add(Severity::Warn, "Clocks low under load", format!("{c} MHz of {m} MHz with no reported limiter"));
             }
         }
     }
 
     // A process pinning a CPU core while the GPU waits.
-    if util < 50.0
+    if let Some(util) = util.filter(|u| *u < 50.0)
         && let Some(p) = procs
             .iter()
             .filter(|p| p.cpu.is_some_and(|c| c >= 95.0) && p.usage.sm_util.is_none_or(|u| u < 50.0))
-            .max_by(|a, b| a.cpu.partial_cmp(&b.cpu).unwrap())
+            .max_by(|a, b| a.cpu.unwrap_or(0.0).total_cmp(&b.cpu.unwrap_or(0.0)))
     {
         add(
             Severity::Info,

@@ -37,8 +37,12 @@ fn first_u64(base: &Path, paths: &[&str]) -> Option<u64> {
     paths.iter().find_map(|p| read_u64(&base.join(p)))
 }
 
+fn parse_id(device_id: &str) -> u32 {
+    u32::from_str_radix(device_id.trim().trim_start_matches("0x"), 16).unwrap_or(0)
+}
+
 fn name_for(device_id: &str) -> String {
-    let id = u32::from_str_radix(device_id.trim_start_matches("0x"), 16).unwrap_or(0);
+    let id = parse_id(device_id);
     let family = match id >> 8 {
         0x56 => "Intel Arc A-series",
         0xe2 => "Intel Arc B-series",
@@ -46,6 +50,14 @@ fn name_for(device_id: &str) -> String {
         _ => "Intel Graphics",
     };
     format!("{family} ({device_id})")
+}
+
+/// Local-memory size attributes (xe, i915); only discrete cards have them.
+const VRAM_SIZE: &[&str] = &["device/tile0/physical_vram_size_bytes", "device/tile0/vram0/size", "lmem_total_bytes"];
+
+/// Discrete Arc families by PCI device id (DG1/DG2 Alchemist, Battlemage).
+fn discrete_id(id: u32) -> bool {
+    matches!(id >> 8, 0x49 | 0x56 | 0xe2)
 }
 
 const ACT_FREQ: &[&str] = &["gt_act_freq_mhz", "gt/gt0/rps_act_freq_mhz", "device/tile0/gt0/freq0/act_freq"];
@@ -75,12 +87,16 @@ impl Intel {
             }
             let pdev =
                 fs::canonicalize(&dev).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
-            let mut info = GpuInfo::new(Vendor::Intel, name_for(&read(&dev.join("device")).unwrap_or_default()));
+            let device_id = read(&dev.join("device")).unwrap_or_default();
+            let mut info = GpuInfo::new(Vendor::Intel, name_for(&device_id));
             info.pci_bus_id = Some(pdev.clone()).filter(|s| !s.is_empty());
             info.max_clock_graphics = first_u64(&card, MAX_FREQ).map(|v| v as u32);
             let hwmon = find_hwmon(&dev);
-            // Discrete cards expose hwmon; integrated ones share system memory.
-            info.integrated = hwmon.is_none();
+            // Discrete cards have local memory (and hwmon); integrated ones
+            // share system memory.
+            let vram = first_u64(&card, VRAM_SIZE).filter(|&v| v > 0);
+            info.integrated = vram.is_none() && hwmon.is_none() && !discrete_id(parse_id(&device_id));
+            info.memory_total = vram;
             if let Some(h) = &hwmon {
                 info.power_limit_default = read_u64(&h.join("power1_max")).map(|u| u as f64 / 1e6);
             }
@@ -115,6 +131,7 @@ impl Backend for Intel {
                     enc_util: dev.enc,
                     dec_util: dev.dec,
                     mem_used: if c.info.integrated { None } else { dev.vram },
+                    mem_total: c.info.memory_total,
                     clock_graphics: first_u64(&c.card, ACT_FREQ).map(|v| v as u32),
                     ..Default::default()
                 };
@@ -181,12 +198,19 @@ mod tests {
         w(&b.join("device/device"), "0x7d55\n");
         w(&b.join("gt_act_freq_mhz"), "1100\n");
         w(&b.join("gt_RP0_freq_mhz"), "2250\n");
+        // A discrete card whose hwmon isn't visible (container): local memory gives it away.
+        let c = root.join("card3");
+        w(&c.join("device/vendor"), "0x8086\n");
+        w(&c.join("device/device"), "0x1234\n");
+        w(&c.join("device/tile0/physical_vram_size_bytes"), "12884901888\n");
         // Not Intel: ignored.
         w(&root.join("card2/device/vendor"), "0x10de\n");
 
         let mut intel = Intel::with_root(&root).unwrap();
         let g = intel.gpus();
-        assert_eq!(g.len(), 2);
+        assert_eq!(g.len(), 3);
+        assert!(!g[2].integrated);
+        assert_eq!(g[2].memory_total, Some(12 << 30));
         assert!(g[0].name.starts_with("Intel Arc B-series"));
         assert_eq!(g[0].max_clock_graphics, Some(2850));
         assert!(!g[0].integrated && g[1].integrated);

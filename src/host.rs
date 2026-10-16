@@ -19,6 +19,10 @@ pub struct Host {
     networks: Networks,
     disks: Disks,
     components: Components,
+    /// Sensor reads are slow on some systems (WMI on Windows): refresh them
+    /// every few samples and reuse the reading in between.
+    cpu_temp: Option<f32>,
+    ticks: u64,
     last_io: std::time::Instant,
     pub info: HostInfo,
 }
@@ -38,9 +42,10 @@ pub fn container_of(cgroup: &str) -> Option<String> {
             if part.starts_with("kubepods")
                 && let Some(i) = part.rfind("-pod")
             {
-                let uid = part[i + 4..].trim_end_matches(".slice").replace('_', "-");
-                if uid.len() >= 8 {
-                    pod = Some(uid[..8].to_string());
+                let uid: String =
+                    part[i + 4..].trim_end_matches(".slice").chars().take(8).map(|c| if c == '_' { '-' } else { c }).collect();
+                if uid.chars().count() == 8 {
+                    pod = Some(uid);
                 }
             }
             for (prefix, runtime) in [
@@ -93,10 +98,10 @@ fn detect_container() -> Option<String> {
                 }
             }
         }
-        if let Ok(e) = std::fs::read_to_string("/proc/1/environ") {
-            if e.contains("container=") {
-                return Some("container".into());
-            }
+        if let Ok(e) = std::fs::read_to_string("/proc/1/environ")
+            && e.contains("container=")
+        {
+            return Some("container".into());
         }
     }
     None
@@ -139,6 +144,8 @@ impl Host {
             networks: Networks::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             components: Components::new_with_refreshed_list(),
+            cpu_temp: None,
+            ticks: 0,
             last_io: std::time::Instant::now(),
             info,
         }
@@ -158,7 +165,6 @@ impl Host {
         self.last_io = std::time::Instant::now();
         self.networks.refresh(true);
         self.disks.refresh(true);
-        self.components.refresh(true);
         let per_s = |b: u64| Some((b as f64 / dt) as u64);
         let (rx, tx) = self
             .networks
@@ -171,16 +177,21 @@ impl Host {
             let u = d.usage();
             (r + u.read_bytes, w + u.written_bytes)
         });
-        let cpu_temp = self
-            .components
-            .iter()
-            .filter(|c| {
-                let l = c.label().to_lowercase();
-                ["cpu", "package", "tctl", "tdie", "core", "k10temp", "coretemp"].iter().any(|k| l.contains(k))
-            })
-            .filter_map(|c| c.temperature())
-            .filter(|t| t.is_finite() && *t > 0.0 && *t < 150.0)
-            .reduce(f32::max);
+        if self.ticks.is_multiple_of(5) {
+            self.components.refresh(true);
+            self.cpu_temp = self
+                .components
+                .iter()
+                .filter(|c| {
+                    let l = c.label().to_lowercase();
+                    ["cpu", "package", "tctl", "tdie", "core", "k10temp", "coretemp"].iter().any(|k| l.contains(k))
+                })
+                .filter_map(|c| c.temperature())
+                .filter(|t| t.is_finite() && *t > 0.0 && *t < 150.0)
+                .reduce(f32::max);
+        }
+        self.ticks += 1;
+        let cpu_temp = self.cpu_temp;
         HostSample {
             net_rx: per_s(rx),
             net_tx: per_s(tx),
@@ -231,7 +242,7 @@ impl Host {
             self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&local), true, kind);
         }
 
-        joined
+        let rows: Vec<ProcRow> = joined
             .into_iter()
             .map(|(gpu, usage, local_pid, mapping)| {
                 let os = local_pid.and_then(|l| self.sys.process(Pid::from_u32(l)));
@@ -273,7 +284,13 @@ impl Host {
                 });
                 ProcRow { gpu, usage, local_pid, mapping, name, cmdline, user, cpu, rss, runtime, spilling: false, container }
             })
-            .collect()
+            .collect();
+        // Forget containers of processes that are gone (pids get reused).
+        if self.containers.len() > rows.len() * 2 + 64 {
+            let live: std::collections::HashSet<u32> = rows.iter().filter_map(|r| r.local_pid).collect();
+            self.containers.retain(|pid, _| live.contains(pid));
+        }
+        rows
     }
 }
 

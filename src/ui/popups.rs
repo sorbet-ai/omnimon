@@ -262,7 +262,7 @@ pub(super) fn tune(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         s("  ←→ ", t.accent),
         s("±5 W  ", t.dim),
-        s("shift ", t.accent),
+        s("H/L ", t.accent),
         s("±25 W  ", t.dim),
         s("enter ", t.accent),
         s("apply  ", t.dim),
