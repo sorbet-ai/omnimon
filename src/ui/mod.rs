@@ -4,8 +4,10 @@
 mod charts;
 mod details;
 mod draw;
+mod filter;
 mod gfx;
 mod history;
+mod input;
 mod overview;
 mod popups;
 mod procs;
@@ -14,6 +16,7 @@ mod timeline;
 mod widgets;
 
 pub use gfx::ChartStyle;
+pub use input::Action;
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -105,6 +108,33 @@ impl SortKey {
     }
 }
 
+/// Overview panels that can be hidden (`:hide host`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Panel {
+    Cards,
+    Host,
+    Procs,
+}
+
+impl Panel {
+    const ALL: [Panel; 3] = [Panel::Cards, Panel::Host, Panel::Procs];
+    fn name(self) -> &'static str {
+        match self {
+            Panel::Cards => "gpus",
+            Panel::Host => "host",
+            Panel::Procs => "procs",
+        }
+    }
+    fn parse(s: &str) -> Option<Panel> {
+        match s {
+            "gpus" | "gpu" | "cards" => Some(Panel::Cards),
+            "host" | "cpu" | "system" => Some(Panel::Host),
+            "procs" | "processes" | "table" => Some(Panel::Procs),
+            _ => None,
+        }
+    }
+}
+
 /// How the process list is filtered and ordered.
 #[derive(Clone, Debug)]
 struct ViewSpec {
@@ -116,18 +146,8 @@ struct ViewSpec {
 
 /// Indices into `procs`, filtered and sorted per `v`. Pure, so it is tested.
 fn filter_sort(procs: &[ProcRow], v: &ViewSpec) -> Vec<usize> {
-    let f = v.filter.to_lowercase();
-    let mut idx: Vec<usize> = (0..procs.len())
-        .filter(|&i| {
-            let p = &procs[i];
-            v.gpu.is_none_or(|g| p.gpu == g)
-                && (f.is_empty()
-                    || p.cmdline.to_lowercase().contains(&f)
-                    || p.user.as_deref().is_some_and(|u| u.to_lowercase().contains(&f))
-                    || p.pid().to_string() == f
-                    || p.local_pid.is_some_and(|l| l.to_string() == f))
-        })
-        .collect();
+    let f = filter::Filter::parse(&v.filter);
+    let mut idx: Vec<usize> = (0..procs.len()).filter(|&i| v.gpu.is_none_or(|g| procs[i].gpu == g) && f.matches(&procs[i])).collect();
     // Sorting by a column nobody reports (GPU memory under WDDM without
     // counters, Apple) is useless; fall back to GPU utilization.
     let key = match v.sort {
@@ -221,6 +241,10 @@ struct App {
     version: u64,
     events: std::collections::VecDeque<crate::events::Event>,
     events_scroll: usize,
+    keymap: input::Keymap,
+    /// Command line being typed after `:`.
+    cmd_edit: Option<String>,
+    hidden: HashSet<Panel>,
     quit: bool,
 }
 
@@ -262,6 +286,9 @@ impl App {
             version: 0,
             events: Default::default(),
             events_scroll: 0,
+            keymap: input::Keymap::new(&cfg.keys),
+            cmd_edit: None,
+            hidden: cfg.hidden.iter().filter_map(|h| Panel::parse(h)).collect(),
             quit: false,
         }
     }
@@ -413,68 +440,92 @@ impl App {
             self.refresh_view();
             return;
         }
-        let ngpu = self.info.gpus.len().max(1);
-        match k.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => {
-                if !self.spec.filter.is_empty() {
-                    self.spec.filter.clear();
-                    self.refresh_view();
-                } else if !self.tagged.is_empty() {
-                    self.tagged.clear();
-                } else {
-                    self.quit = true;
+        if let Some(line) = &mut self.cmd_edit {
+            match k.code {
+                KeyCode::Esc => self.cmd_edit = None,
+                KeyCode::Enter => {
+                    let line = std::mem::take(line);
+                    self.cmd_edit = None;
+                    match self.run_command(&line, sampler) {
+                        Ok(msg) if !msg.is_empty() => self.toast(msg, false),
+                        Ok(_) => {}
+                        Err(e) => self.toast(e, true),
+                    }
                 }
+                KeyCode::Backspace => {
+                    line.pop();
+                }
+                KeyCode::Char(c) => line.push(c),
+                _ => {}
             }
-            KeyCode::Char('?') | KeyCode::F(1) => self.popup = Some(Popup::Help),
-            KeyCode::Tab => self.tab = self.tab.step(1),
-            KeyCode::BackTab => self.tab = self.tab.step(-1),
-            KeyCode::Char('1') => self.tab = Tab::Overview,
-            KeyCode::Char('2') => self.tab = Tab::Charts,
-            KeyCode::Char('3') => self.tab = Tab::Details,
-            KeyCode::Char('4') => self.tab = Tab::Events,
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') | KeyCode::PageUp | KeyCode::PageDown
-                if self.tab == Tab::Events =>
-            {
-                let d: isize = match k.code {
-                    KeyCode::Up | KeyCode::Char('k') => -1,
-                    KeyCode::Down | KeyCode::Char('j') => 1,
-                    KeyCode::PageUp => -20,
+            return;
+        }
+        if k.code == KeyCode::Esc {
+            if !self.spec.filter.is_empty() {
+                self.spec.filter.clear();
+                self.refresh_view();
+            } else if !self.tagged.is_empty() {
+                self.tagged.clear();
+            } else {
+                self.quit = true;
+            }
+            return;
+        }
+        if let Some(a) = self.keymap.action(&k) {
+            self.apply(a, sampler);
+        }
+    }
+
+    fn apply(&mut self, a: Action, sampler: &Sampler) {
+        let ngpu = self.info.gpus.len().max(1);
+        let scroll_events = self.tab == Tab::Events;
+        match a {
+            Action::Quit => self.quit = true,
+            Action::Help => self.popup = Some(Popup::Help),
+            Action::NextTab => self.tab = self.tab.step(1),
+            Action::PrevTab => self.tab = self.tab.step(-1),
+            Action::Overview => self.tab = Tab::Overview,
+            Action::Charts => self.tab = Tab::Charts,
+            Action::Details => self.tab = Tab::Details,
+            Action::Events => self.tab = Tab::Events,
+            Action::Up | Action::Down | Action::PageUp | Action::PageDown if scroll_events => {
+                let d: isize = match a {
+                    Action::Up => -1,
+                    Action::Down => 1,
+                    Action::PageUp => -20,
                     _ => 20,
                 };
                 self.events_scroll = self.events_scroll.saturating_add_signed(d).min(self.events.len().saturating_sub(1));
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
-            KeyCode::PageUp => self.move_sel(-10),
-            KeyCode::PageDown => self.move_sel(10),
-            KeyCode::Home => self.move_sel(isize::MIN),
-            KeyCode::End => self.move_sel(isize::MAX),
-            KeyCode::Left | KeyCode::Char('[') => {
-                self.sel_gpu = (self.sel_gpu + ngpu - 1) % ngpu;
+            Action::Up => self.move_sel(-1),
+            Action::Down => self.move_sel(1),
+            Action::PageUp => self.move_sel(-10),
+            Action::PageDown => self.move_sel(10),
+            Action::Top => self.move_sel(isize::MIN),
+            Action::Bottom => self.move_sel(isize::MAX),
+            Action::PrevGpu | Action::NextGpu => {
+                let d = if a == Action::PrevGpu { ngpu - 1 } else { 1 };
+                self.sel_gpu = (self.sel_gpu + d) % ngpu;
                 self.refresh_view();
             }
-            KeyCode::Right | KeyCode::Char(']') => {
-                self.sel_gpu = (self.sel_gpu + 1) % ngpu;
-                self.refresh_view();
-            }
-            KeyCode::Char('s') | KeyCode::F(6) | KeyCode::Char('S') => {
-                let k = self.spec.sort.step(if k.code == KeyCode::Char('S') { -1 } else { 1 });
+            Action::SortNext | Action::SortPrev => {
+                let k = self.spec.sort.step(if a == Action::SortPrev { -1 } else { 1 });
                 self.spec.sort = k;
                 self.spec.desc = k.default_desc();
                 self.refresh_view();
             }
-            KeyCode::Char('r') => {
+            Action::SortReverse => {
                 self.spec.desc = !self.spec.desc;
                 self.refresh_view();
             }
-            KeyCode::Char('/') => self.filter_edit = true,
-            KeyCode::Char('g') => {
+            Action::Filter => self.filter_edit = true,
+            Action::Command => self.cmd_edit = Some(String::new()),
+            Action::GpuOnly => {
                 self.gpu_only = !self.gpu_only;
                 self.refresh_view();
             }
-            KeyCode::Char('c') => self.full_cmd = !self.full_cmd,
-            KeyCode::Char(' ') => {
+            Action::FullCommand => self.full_cmd = !self.full_cmd,
+            Action::Tag => {
                 if let Some(key) = self.sel_key {
                     if !self.tagged.remove(&key) {
                         self.tagged.insert(key);
@@ -482,26 +533,132 @@ impl App {
                     self.move_sel(1);
                 }
             }
-            KeyCode::Enter => {
+            Action::ProcessDetails => {
                 if let Some(key) = self.sel_key {
                     let details = self.row_by_key(key).and_then(|p| p.local_pid).and_then(crate::host::process_details).map(Box::new);
                     self.popup = Some(Popup::Process { key, details, full_env: false });
                 }
             }
-            KeyCode::Char('K') | KeyCode::Char('x') | KeyCode::Delete | KeyCode::F(9) => self.open_kill(),
-            KeyCode::Char('G') => self.cycle_chart_style(),
-            KeyCode::Char('t') => {
+            Action::Kill => self.open_kill(),
+            Action::ChartStyle => self.cycle_chart_style(),
+            Action::Theme => {
                 self.theme = (self.theme + 1) % theme::THEMES.len();
                 self.toast(format!("theme: {}", self.theme().name), false);
             }
-            KeyCode::Char('p') => {
+            Action::Pause => {
                 self.paused = !self.paused;
                 sampler.ctl.paused.store(self.paused, Ordering::Relaxed);
                 sampler.poke();
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => self.set_interval(sampler, false),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.set_interval(sampler, true),
-            _ => {}
+            Action::Slower => self.set_interval(sampler, false),
+            Action::Faster => self.set_interval(sampler, true),
+        }
+    }
+
+    /// `:` commands. Returns a confirmation for the toast.
+    fn run_command(&mut self, line: &str, sampler: &Sampler) -> Result<String, String> {
+        let mut words = line.split_whitespace();
+        let Some(cmd) = words.next() else { return Ok(String::new()) };
+        let rest: Vec<&str> = words.collect();
+        let arg = rest.first().copied().unwrap_or("");
+        match cmd {
+            "q" | "quit" => {
+                self.quit = true;
+                Ok(String::new())
+            }
+            "theme" => {
+                let i = theme::by_name(arg)
+                    .ok_or_else(|| format!("themes: {}", theme::THEMES.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")))?;
+                self.theme = i;
+                Ok(format!("theme: {arg}"))
+            }
+            "sort" => {
+                let key = SortKey::CYCLE
+                    .iter()
+                    .copied()
+                    .find(|k| serde_json::to_value(k).ok().and_then(|v| v.as_str().map(|s| s == arg)).unwrap_or(false))
+                    .or(match arg {
+                        "mem" | "vram" => Some(SortKey::GpuMem),
+                        "spill" | "shared" | "sys" => Some(SortKey::SharedMem),
+                        "util" | "gpu%" => Some(SortKey::Sm),
+                        "ram" => Some(SortKey::Rss),
+                        "command" | "cmd" => Some(SortKey::Name),
+                        _ => None,
+                    })
+                    .ok_or("sort by: gpu_mem shared_mem sm cpu rss time pid user name gpu")?;
+                self.spec.sort = key;
+                self.spec.desc = match rest.get(1) {
+                    Some(&"asc") => false,
+                    Some(&"desc") => true,
+                    _ => key.default_desc(),
+                };
+                self.refresh_view();
+                Ok(format!("sorted by {arg}"))
+            }
+            "filter" | "f" => {
+                self.spec.filter = rest.join(" ");
+                self.refresh_view();
+                Ok(String::new())
+            }
+            "clear" => {
+                self.spec.filter.clear();
+                self.tagged.clear();
+                self.refresh_view();
+                Ok("cleared".into())
+            }
+            "hide" | "show" | "toggle" => {
+                let panel = Panel::parse(arg)
+                    .ok_or_else(|| format!("panels: {}", Panel::ALL.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ")))?;
+                let hide = match cmd {
+                    "hide" => true,
+                    "show" => false,
+                    _ => !self.hidden.contains(&panel),
+                };
+                if hide {
+                    self.hidden.insert(panel);
+                } else {
+                    self.hidden.remove(&panel);
+                }
+                Ok(format!("{} {}", if hide { "hid" } else { "showing" }, panel.name()))
+            }
+            "charts" => {
+                self.chart_style = match arg {
+                    "pixels" if self.gfx.pixels_available() => ChartStyle::Pixels,
+                    "pixels" => return Err("this terminal didn't report image support".into()),
+                    "blocks" => ChartStyle::Blocks,
+                    "braille" => ChartStyle::Braille,
+                    _ => return Err("charts: pixels, blocks, braille".into()),
+                };
+                self.saved_chart_style = Some(self.chart_style);
+                Ok(format!("charts: {arg}"))
+            }
+            "interval" | "i" => {
+                let secs: f64 = arg.parse().map_err(|_| "interval <seconds>")?;
+                let ms = (secs.clamp(0.1, 60.0) * 1000.0) as u64;
+                self.interval = Duration::from_millis(ms);
+                sampler.ctl.interval_ms.store(ms, Ordering::Relaxed);
+                sampler.poke();
+                Ok(format!("refresh every {secs}s"))
+            }
+            "gpu" => {
+                let g: usize = arg.parse().map_err(|_| "gpu <index>")?;
+                if g >= self.info.gpus.len() {
+                    return Err(format!("no GPU {g}"));
+                }
+                self.sel_gpu = g;
+                self.refresh_view();
+                Ok(String::new())
+            }
+            "tab" | "view" => {
+                self.tab =
+                    Tab::ALL.into_iter().find(|t| t.label().eq_ignore_ascii_case(arg)).ok_or("views: overview charts details events")?;
+                Ok(String::new())
+            }
+            "help" => {
+                self.popup = Some(Popup::Help);
+                Ok(String::new())
+            }
+            _ => Err(format!("unknown command {cmd:?}: theme sort filter clear hide show charts interval gpu view quit")),
         }
     }
 
@@ -615,6 +772,8 @@ impl App {
             sort_desc: Some(self.spec.desc),
             full_cmd: Some(self.full_cmd),
             chart_style: self.saved_chart_style,
+            hidden: self.hidden.iter().map(|p| p.name().to_string()).collect(),
+            keys: Default::default(),
         });
     }
 }

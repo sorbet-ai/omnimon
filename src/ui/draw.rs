@@ -183,28 +183,41 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let t = app.theme();
-    let keys: &[(&str, &str)] = match app.tab {
+    if let Some(line) = &app.cmd_edit {
+        let hint = "theme · sort · filter · hide/show gpus|host|procs · charts · interval · gpu · view · quit";
+        f.render_widget(Paragraph::new(Line::from(vec![s(" :", t.accent).bold(), s(line.as_str(), t.fg), s("▏", t.accent)])), area);
+        f.render_widget(Paragraph::new(Line::from(s(format!("{hint} "), t.faint)).right_aligned()), area);
+        return;
+    }
+    use super::Action as A;
+    let actions: &[(A, &str)] = match app.tab {
         Tab::Overview => &[
-            ("q", "quit"),
-            ("?", "help"),
-            ("tab", "view"),
-            ("↑↓", "select"),
-            ("←→", "gpu"),
-            ("s", "sort"),
-            ("/", "filter"),
-            ("g", "this gpu"),
-            ("enter", "details"),
-            ("K", "kill"),
-            ("t", "theme"),
-            ("G", "charts"),
-            ("p", "pause"),
+            (A::Quit, "quit"),
+            (A::Help, "help"),
+            (A::Command, "command"),
+            (A::NextTab, "view"),
+            (A::SortNext, "sort"),
+            (A::Filter, "filter"),
+            (A::GpuOnly, "this gpu"),
+            (A::ProcessDetails, "details"),
+            (A::Kill, "kill"),
+            (A::Theme, "theme"),
+            (A::ChartStyle, "charts"),
+            (A::Pause, "pause"),
         ],
-        _ => {
-            &[("q", "quit"), ("?", "help"), ("tab", "view"), ("←→", "gpu"), ("t", "theme"), ("G", "charts"), ("+-", "rate"), ("p", "pause")]
-        }
+        _ => &[
+            (A::Quit, "quit"),
+            (A::Help, "help"),
+            (A::Command, "command"),
+            (A::NextTab, "view"),
+            (A::Theme, "theme"),
+            (A::ChartStyle, "charts"),
+            (A::Pause, "pause"),
+        ],
     };
+    let keys: Vec<(&str, &str)> = actions.iter().map(|(a, d)| (app.keymap.label(*a), *d)).filter(|(k, _)| !k.is_empty()).collect();
     let mut spans = vec![Span::raw(" ")];
-    for (k, d) in keys {
+    for (k, d) in &keys {
         spans.push(Span::styled(*k, Style::new().fg(t.accent).bold()));
         spans.push(s(format!(" {d}  "), t.dim));
     }

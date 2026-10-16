@@ -22,36 +22,26 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 
 pub(super) fn help(f: &mut Frame, app: &App) {
     let t = app.theme();
-    let keys: &[(&str, &str)] = &[
-        ("1 2 3 4 / Tab", "overview · charts · details · events"),
-        ("← → [ ]", "select GPU (or click a card)"),
-        ("↑ ↓ j k PgUp PgDn", "move in process list (or wheel / click)"),
-        ("s / S", "next / previous sort column (or click header)"),
-        ("r", "reverse sort"),
-        ("/", "filter by command, user or PID (Esc clears)"),
-        ("g", "only show processes on the selected GPU"),
-        ("c", "toggle full command line"),
-        ("enter", "process details"),
-        ("space", "tag process (for multi-kill)"),
-        ("K  Del  F9", "signal tagged / selected process"),
-        ("t", "cycle theme"),
-        ("G", "chart style: pixels · blocks · braille"),
-        ("+ / -", "slower / faster refresh"),
-        ("p", "pause sampling"),
-        ("q  Esc  Ctrl-C", "quit"),
-    ];
-    let mut lines: Vec<Line> = keys.iter().map(|(k, d)| Line::from(vec![s(format!("{k:>18}  "), t.accent).bold(), s(*d, t.fg)])).collect();
+    let mut lines: Vec<Line> = app
+        .keymap
+        .help_rows()
+        .into_iter()
+        .map(|(k, d)| Line::from(vec![s(format!("{:>22}  ", fmt::truncate(&k, 22)), t.accent).bold(), s(d, t.fg)]))
+        .collect();
+    lines.push(Line::from(vec![s(format!("{:>22}  ", "esc"), t.accent).bold(), s("clear filter / tags, then quit", t.fg)]));
     lines.push(Line::default());
-    lines.push(Line::from(vec![s("               PID ", t.dim), s("h123", t.faint), s("  driver PID outside this namespace", t.dim)]));
-    lines.push(Line::from(vec![s("                   ", t.dim), s("⇄", t.accent), s("  translated from a host PID", t.dim)]));
-    lines.push(Line::from(vec![s("                   ", t.dim), s("≈ ~", t.warn), s("  matched heuristically", t.dim)]));
-    lines.push(Line::from(vec![s("           SYS-MEM ", t.dim), s("!1.2G", t.crit), s("  GPU memory spilled into system RAM", t.dim)]));
+    let legend =
+        |k: &str, v: &str, c, d: &str| Line::from(vec![s(format!("{k:>16} "), t.dim), s(format!("{v:<5}"), c), s(format!("  {d}"), t.dim)]);
+    lines.push(legend("PID", "h123", t.faint, "driver PID outside this namespace"));
+    lines.push(legend("", "⇄", t.accent, "translated from a host PID"));
+    lines.push(legend("", "≈ ~", t.warn, "matched heuristically"));
+    lines.push(legend("SYS-MEM", "!1.2G", t.crit, "GPU memory spilled into system RAM"));
     lines.push(Line::default());
     let charts =
         if app.chart_ctx().pixels() { format!("pixels ({})", app.gfx.protocol_name()) } else { app.chart_style.label().to_string() };
     let colors = if app.truecolor { "truecolor" } else { "256 colors" };
     lines.push(Line::from(s(format!("{APP_NAME} {APP_VERSION} · theme {} · {colors} · charts {charts}", t.name), t.faint)).centered());
-    let r = centered(f.area(), 74, lines.len() as u16 + 2);
+    let r = centered(f.area(), 84, lines.len() as u16 + 2);
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(lines).block(block(t, true).title_top(Line::from(s(" keys ", t.title).bold()))), r);
 }

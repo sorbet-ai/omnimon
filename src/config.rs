@@ -16,6 +16,11 @@ pub struct Config {
     pub sort_desc: Option<bool>,
     pub full_cmd: Option<bool>,
     pub chart_style: Option<crate::ui::ChartStyle>,
+    /// Overview panels to hide: "gpus", "host", "procs".
+    pub hidden: Vec<String>,
+    /// Key overrides per action, e.g. {"kill": ["K", "f9"]}. Hand-edited;
+    /// preserved across saves.
+    pub keys: std::collections::HashMap<crate::ui::Action, Vec<String>>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -36,8 +41,14 @@ pub fn load() -> Config {
     path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
-/// Best effort; a read-only home (containers) is fine.
+/// Best effort; a read-only home (containers) is fine. Hand-edited key
+/// bindings already on disk are kept.
 pub fn save(c: &Config) {
+    let mut c = c.clone();
+    if c.keys.is_empty() {
+        c.keys = load().keys;
+    }
+    let c = &c;
     let Some(p) = path() else { return };
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);

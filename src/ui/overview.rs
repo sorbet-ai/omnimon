@@ -20,26 +20,42 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         draw_no_gpus(f, app, area);
         return;
     }
-    let host_h = 5u16;
+    let show = |p: super::Panel| !app.hidden.contains(&p);
+    let host_h = if show(super::Panel::Host) { 5u16 } else { 0 };
+    let procs_on = show(super::Panel::Procs);
     // The process list gets what it needs (within reason); GPU cards grow
     // into the rest, up to a cap, so a lone GPU gets a big chart.
-    let want_procs = (app.view.len() as u16 + 4).clamp(7, 18);
+    let want_procs = if procs_on { (app.view.len() as u16 + 4).clamp(7, 18) } else { 0 };
     let avail = area.height.saturating_sub(host_h + want_procs);
-    let per_card = (avail / n as u16).min(if n == 1 { 13 } else { 10 });
+    let cap = if !procs_on || n == 1 { 13u16.max(avail / n as u16) } else { 10 };
+    let per_card = (avail / n as u16).min(cap);
     let full = per_card >= 6;
-    let gpu_h = if full { per_card * n as u16 } else { (n as u16 + 2).min(area.height.saturating_sub(host_h + 7).max(3)) };
-    let [gpus, host, procs] = Layout::vertical([Constraint::Length(gpu_h), Constraint::Length(host_h), Constraint::Min(3)]).areas(area);
-
-    if full {
-        let rows = Layout::vertical(vec![Constraint::Length(per_card); n]).split(gpus);
-        for (i, r) in rows.iter().enumerate() {
-            card(f, app, i, *r, hit);
-        }
+    let gpu_h = if !show(super::Panel::Cards) {
+        0
+    } else if full {
+        per_card * n as u16
     } else {
-        compact(f, app, gpus, hit);
+        (n as u16 + 2).min(area.height.saturating_sub(host_h + 7).max(3))
+    };
+    let rest = if procs_on { Constraint::Min(3) } else { Constraint::Length(0) };
+    let [gpus, host, procs] = Layout::vertical([Constraint::Length(gpu_h), Constraint::Length(host_h), rest]).areas(area);
+
+    if gpu_h > 0 {
+        if full {
+            let rows = Layout::vertical(vec![Constraint::Length(per_card); n]).split(gpus);
+            for (i, r) in rows.iter().enumerate() {
+                card(f, app, i, *r, hit);
+            }
+        } else {
+            compact(f, app, gpus, hit);
+        }
     }
-    host_panel(f, app, host);
-    super::procs::draw(f, app, procs, hit);
+    if host_h > 0 {
+        host_panel(f, app, host);
+    }
+    if procs_on {
+        super::procs::draw(f, app, procs, hit);
+    }
 }
 
 fn title<'a>(app: &App, g: &GpuInfo, sm: &GpuSample, compact: bool) -> Line<'a> {
