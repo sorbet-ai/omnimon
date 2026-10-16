@@ -11,7 +11,11 @@ pub mod apple;
 pub mod demo;
 #[cfg(target_os = "linux")]
 pub mod drm_fdinfo;
+#[cfg(target_os = "linux")]
+pub mod intel;
 pub mod nvml;
+#[cfg(target_os = "linux")]
+mod sysfs;
 #[cfg(windows)]
 pub mod wddm;
 
@@ -54,6 +58,8 @@ pub fn detect(demo: Option<usize>) -> Detected {
 
     #[cfg(target_os = "linux")]
     add(&mut backends, "AMD", amd::Amd::new().map(|b| Box::new(b) as Box<dyn Backend>));
+    #[cfg(target_os = "linux")]
+    add(&mut backends, "Intel", intel::Intel::new().map(|b| Box::new(b) as Box<dyn Backend>));
 
     // Everything else on Windows (AMD, Intel, NVIDIA without NVML), skipping
     // adapters a richer backend already covers.
