@@ -15,9 +15,10 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: true }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: true, cross: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin, cross: true }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -26,14 +27,17 @@ jobs:
           targets: ${{ matrix.target }}
           components: clippy, rustfmt
       - name: Format
-        if: ${{ !contains(matrix.target, 'aarch64-unknown-linux') }}
+        if: ${{ !matrix.cross }}
         run: cargo fmt --check
       - name: Test
-        if: ${{ !contains(matrix.target, 'aarch64-unknown-linux') }}
+        if: ${{ !matrix.cross }}
         run: cargo test
       - name: Clippy
-        if: ${{ !contains(matrix.target, 'aarch64-unknown-linux') }}
+        if: ${{ !matrix.cross }}
         run: cargo clippy --all-targets -- -D warnings
+      - name: Installer scripts
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: sh -n install.sh
       - name: Build (zig, glibc 2.17)
         if: matrix.zig
         run: |
@@ -62,10 +66,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Checksums and installers
+        run: |
+          cd dist
+          sha256sum omnimon-* > SHA256SUMS
+          cp ../install.sh ../install.ps1 .
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

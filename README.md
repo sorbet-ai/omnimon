@@ -130,16 +130,41 @@ signal the wrong process (tested against a simulated `/proc`). **WSL2**: the dri
 `nvidia-smi` shows none); work done inside WSL shows up on the Windows side as
 `vmwp.exe`. Details per backend: [docs/backends.md](docs/backends.md).
 
-## Install / build
+## Install
+
+Linux and macOS:
 
 ```sh
-cargo install omnimon                 # from crates.io (Rust 1.91+)
-cargo build --release                 # from source
-scripts/build-linux.sh                # portable Linux x86_64 + aarch64 (glibc >= 2.17), needs Docker
+curl -fsSL https://github.com/sorbet-ai/omnimon/releases/latest/download/install.sh | sh
 ```
 
-Prebuilt binaries for Linux (x86_64, aarch64), Windows and macOS (Apple
-Silicon) are attached to each [GitHub release](https://github.com/sorbet-ai/omnimon/releases).
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/sorbet-ai/omnimon/releases/latest/download/install.ps1 | iex
+```
+
+The scripts pick the right binary for the OS and CPU, check it against the
+release's `SHA256SUMS`, and put it in `~/.local/bin` (`/usr/local/bin` as
+root) or `%LOCALAPPDATA%\Programs\omnimon`. `OMNIMON_VERSION` and
+`OMNIMON_INSTALL_DIR` override the version and location.
+
+Or with a package manager:
+
+```sh
+brew install sorbet-ai/tap/omnimon                       # macOS, Linux
+scoop bucket add sorbet-ai https://github.com/sorbet-ai/scoop-bucket
+scoop install omnimon                                     # Windows
+cargo binstall omnimon                                    # prebuilt, via cargo-binstall
+cargo install omnimon                                     # from source (Rust 1.91+)
+```
+
+Prebuilt binaries for Linux (x86_64, aarch64), Windows (x64) and macOS
+(Apple Silicon, Intel) are attached to each
+[release](https://github.com/sorbet-ai/omnimon/releases).
+
+Building from a checkout: `cargo build --release`, or
+`scripts/build-linux.sh` for portable Linux binaries (needs Docker).
 
 The Linux release binary only needs glibc 2.17+ (tested back to CentOS 7). It
 isn't static musl on purpose: a static binary can't `dlopen` the glibc-linked
@@ -245,6 +270,8 @@ hides it or shows N/A.
   WSL with tmux and Python + Pillow, after `scripts/build-linux.sh`).
 - `scripts/tui-shot.sh` runs the Linux binary in a detached tmux session and
   dumps the screen; `scripts/ansi2png.py` renders a capture to PNG.
+- `scripts/package.sh VERSION [--publish]` (maintainer tool): Homebrew,
+  Scoop, winget and AUR manifests from a release's checksums.
 - `scripts/mac-sync.sh` (maintainer tool): copies the tree to a Mac over SSH
   and builds there (`MAC=user@host`).
 
