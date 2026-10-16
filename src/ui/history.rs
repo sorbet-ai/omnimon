@@ -88,6 +88,8 @@ pub struct History {
     pub cpu: Ring,
     /// Host memory in use, fraction of total.
     pub mem: Ring,
+    /// Hottest CPU sensor, as a fraction of 100 °C.
+    pub cpu_temp: Ring,
     /// Bytes/s.
     pub net_rx: Ring,
     pub net_tx: Ring,
@@ -119,7 +121,7 @@ impl History {
                     r.push(gap, None);
                 }
             }
-            for r in [&mut self.cpu, &mut self.mem, &mut self.net_rx, &mut self.net_tx, &mut self.disk] {
+            for r in [&mut self.cpu, &mut self.mem, &mut self.cpu_temp, &mut self.net_rx, &mut self.net_tx, &mut self.disk] {
                 r.push(gap, None);
             }
         }
@@ -152,6 +154,7 @@ impl History {
         }
         self.cpu.push(t, Some(s.host.cpu as f64 / 100.0));
         self.mem.push(t, (s.host.mem_total > 0).then(|| s.host.mem_used as f64 / s.host.mem_total as f64));
+        self.cpu_temp.push(t, s.host.cpu_temp.map(|c| (c as f64 / 100.0).clamp(0.0, 1.0)));
         self.net_rx.push(t, s.host.net_rx.map(|v| v as f64));
         self.net_tx.push(t, s.host.net_tx.map(|v| v as f64));
         self.disk.push(

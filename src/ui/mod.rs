@@ -149,6 +149,8 @@ struct App {
     toast: Option<(String, Instant, bool)>,
     theme: usize,
     look: Look,
+    /// The Charts tab shows the host instead of the selected GPU.
+    charts_host: bool,
     /// The look to persist: only an explicit choice (`L`, `:look`).
     saved_look: Option<Look>,
     truecolor: bool,
@@ -192,6 +194,7 @@ impl App {
             theme,
             look: opts.look.as_deref().and_then(Look::parse).or(cfg.look).unwrap_or_default(),
             saved_look: cfg.look,
+            charts_host: false,
             truecolor: theme::truecolor_supported(),
             readonly: opts.readonly,
             paused: false,
@@ -427,6 +430,17 @@ impl App {
             Action::PageDown => self.move_sel(10),
             Action::Top => self.move_sel(isize::MIN),
             Action::Bottom => self.move_sel(isize::MAX),
+            // On the Charts tab the host is one more stop after the last GPU.
+            Action::PrevGpu | Action::NextGpu if self.tab == Tab::Charts => {
+                let stops = ngpu + 1;
+                let cur = if self.charts_host { ngpu } else { self.sel_gpu };
+                let next = (cur + if a == Action::PrevGpu { stops - 1 } else { 1 }) % stops;
+                self.charts_host = next == ngpu;
+                if next < ngpu {
+                    self.sel_gpu = next;
+                }
+                self.refresh_view();
+            }
             Action::PrevGpu | Action::NextGpu => {
                 let d = if a == Action::PrevGpu { ngpu - 1 } else { 1 };
                 self.sel_gpu = (self.sel_gpu + d) % ngpu;
@@ -719,7 +733,11 @@ impl App {
                 } else if let Some(&(_, t)) = self.hit.tabs.iter().find(|(r, _)| inside(*r)) {
                     self.tab = t;
                 } else if let Some(&(_, g)) = self.hit.gpus.iter().find(|(r, _)| inside(*r)) {
-                    self.sel_gpu = g;
+                    // Past the last GPU: the host entry on the Charts tab.
+                    self.charts_host = g >= self.info.gpus.len();
+                    if !self.charts_host {
+                        self.sel_gpu = g;
+                    }
                     self.refresh_view();
                 } else if m.row == self.hit.proc_header_y {
                     if let Some(&(_, _, k)) = self.hit.proc_header.iter().find(|(x0, x1, _)| m.column >= *x0 && m.column < *x1) {
@@ -815,7 +833,7 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
             if event::poll(Duration::from_millis(80))? {
                 // Sixel/iTerm2 images aren't tied to cells: anything that changes
                 // what covers them needs a full repaint.
-                let before = (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu);
+                let before = (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu, app.charts_host);
                 loop {
                     match event::read()? {
                         Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k, &sampler),
@@ -826,7 +844,9 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
                         break;
                     }
                 }
-                if app.popup_chart_ctx().pixels() && before != (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu) {
+                if app.popup_chart_ctx().pixels()
+                    && before != (app.tab, app.popup.is_some(), app.theme, app.chart_style, app.sel_gpu, app.charts_host)
+                {
                     app.gfx.invalidate();
                     terminal.clear()?;
                 }
