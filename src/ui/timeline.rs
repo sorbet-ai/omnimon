@@ -12,17 +12,18 @@ use crate::events::Severity;
 
 pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
     let t = app.theme();
-    let shown = app.events.len();
+    let shown = app.store.events.len();
     let b = block(t, true)
         .title_top(Line::from(vec![s(" Events ", t.title).bold(), s(format!("{shown} "), t.dim)]))
         .title_bottom(Line::from(s(" spills, clock limits, errors, process start/exit · newest first ", t.faint)).right_aligned());
     let inner = b.inner(area);
     f.render_widget(b, area);
-    if app.events.is_empty() {
+    if app.store.events.is_empty() {
         f.render_widget(Paragraph::new(s("nothing yet", t.faint)).centered(), Rect { y: inner.y + inner.height / 2, height: 1, ..inner });
         return;
     }
     let lines: Vec<Line> = app
+        .store
         .events
         .iter()
         .rev()

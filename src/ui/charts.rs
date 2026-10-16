@@ -30,7 +30,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         return;
     }
     let i = app.sel_gpu.min(n - 1);
-    let (Some(g), Some(sm), Some(h)) = (app.gpu(i), app.sample(i), app.hist.gpus.get(i)) else { return };
+    let (Some(g), Some(sm), Some(h)) = (app.gpu(i), app.sample(i), app.store.hist.gpus.get(i)) else { return };
 
     // GPU selector strip when there are several.
     let area = if n > 1 {
@@ -116,13 +116,13 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             .title_top(Line::from(s(format!(" {} ", c.value), t.fg).bold()).right_aligned());
         let inner = b.inner(cell);
         let w = ctx.samples(inner.width);
-        let raw = app.hist.tail(c.data, w);
-        let secs = (w as f64 * app.interval.as_secs_f64()) as u64;
+        let raw = app.store.hist.tail(c.data, w);
+        let secs = app.store.hist.span(c.data, w).unwrap_or(w as f64 * app.interval.as_secs_f64()) as u64;
         let b = b.title_bottom(Line::from(s(format!(" {} ", fmt::duration(secs)), t.faint)));
         let slot = 100 + (i as u32) * 10 + k as u32;
         match c.mirror {
             Some((m, grad2)) => {
-                let mraw = app.hist.tail(m, w);
+                let mraw = app.store.hist.tail(m, w);
                 let max = raw.iter().chain(mraw).flatten().copied().fold(1.0f64, f64::max);
                 let norm = |v: &[Option<f64>]| v.iter().map(|x| x.map(|x| x / max)).collect::<Vec<_>>();
                 let (up, down) = (norm(raw), norm(mraw));

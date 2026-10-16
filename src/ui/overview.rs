@@ -225,10 +225,10 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
         }
         let ctx = app.chart_ctx();
         let n = ctx.samples(chart.width);
-        let Some(h) = app.hist.gpus.get(i) else { return };
+        let Some(h) = app.store.hist.gpus.get(i) else { return };
         let series = [
-            Series { data: app.hist.tail(&h.util, n), grad: t.util, down: false },
-            Series { data: app.hist.tail(&h.mem, n), grad: mem_grad, down: true },
+            Series { data: app.store.hist.tail(&h.util, n), grad: t.util, down: false },
+            Series { data: app.store.hist.tail(&h.mem, n), grad: mem_grad, down: true },
         ];
         ctx.draw(f, chart, 1 + i as u32, &series);
         // Text over a pixel image would punch holes in it; the values are in the bars.
@@ -306,9 +306,9 @@ fn compact(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         f.render_widget(Paragraph::new(temp), cols[8]);
         let pc = app.power_frac(i, sm).map(|v| t.power.at(v)).unwrap_or(t.dim);
         f.render_widget(Paragraph::new(s(sm.power.map(|p| format!(" {p:>4.0}W")).unwrap_or(" N/A".into()), pc)), cols[9]);
-        if let Some(h) = app.hist.gpus.get(i) {
+        if let Some(h) = app.store.hist.gpus.get(i) {
             let spark = Rect { x: cols[10].x + 1, width: cols[10].width.saturating_sub(1), ..cols[10] };
-            f.render_widget(Spark { data: app.hist.tail(&h.util, spark.width as usize), grad: t.util }, spark);
+            f.render_widget(Spark { data: app.store.hist.tail(&h.util, spark.width as usize), grad: t.util }, spark);
         }
     }
 }
@@ -317,7 +317,7 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
     let t = app.theme();
     let hi = &app.info.host;
     let mut title = vec![s(" host ", t.title).bold(), s(format!("{} · {} cores ", hi.cpu_brand, hi.cpu_cores), t.dim)];
-    let Some(snap) = &app.snap else {
+    let Some(snap) = app.snap() else {
         f.render_widget(block(t, false).title_top(Line::from(title)), area);
         return;
     };
@@ -359,7 +359,7 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
     }
     if x + 12 < end {
         let rest = Rect { x: x + 1, width: end - x - 1, ..cores };
-        f.render_widget(Spark { data: app.hist.tail(&app.hist.cpu, rest.width as usize), grad: t.cpu }, rest);
+        f.render_widget(Spark { data: app.store.hist.tail(&app.store.hist.cpu, rest.width as usize), grad: t.cpu }, rest);
     }
 
     // Memory + swap.
@@ -409,7 +409,7 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
         let max = r.iter().flatten().copied().fold(1.0f64, f64::max);
         r.iter().map(|v| v.map(|x| x / max)).collect::<Vec<_>>()
     };
-    let rx = scaled(app.hist.tail(&app.hist.net_rx, nspark.width as usize));
+    let rx = scaled(app.store.hist.tail(&app.store.hist.net_rx, nspark.width as usize));
     f.render_widget(Spark { data: &rx, grad: t.mem }, nspark);
     f.render_widget(Paragraph::new(s(" DSK", t.dim)), dl);
     f.render_widget(
@@ -421,6 +421,6 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
         ])),
         dval,
     );
-    let disk = scaled(app.hist.tail(&app.hist.disk, dspark.width as usize));
+    let disk = scaled(app.store.hist.tail(&app.store.hist.disk, dspark.width as usize));
     f.render_widget(Spark { data: &disk, grad: t.power }, Rect { x: dspark.x + 1, width: dspark.width.saturating_sub(1), ..dspark });
 }

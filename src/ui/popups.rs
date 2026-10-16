@@ -128,7 +128,7 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     if let Some(c) = &p.container {
         lines.push(kv("container", c.clone()));
     }
-    if let Some(h) = app.hist.procs.get(key).filter(|h| h.energy > 0.0) {
+    if let Some(h) = app.store.hist.procs.get(key).filter(|h| h.energy > 0.0) {
         let cost = app.price_per_kwh.map(|pr| format!(" · ≈{:.3}", h.energy / 3.6e6 * pr)).unwrap_or_default();
         lines.push(kv("energy", format!("≈{:.1} Wh while watched (share of GPU power by SM use){cost}", h.energy / 3600.0)));
     }
@@ -209,14 +209,14 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines), Rect { height: text_h, ..inner });
     let top = inner.y + text_h + 1;
     let bottom = inner.y + inner.height;
-    let Some(h) = app.hist.procs.get(key) else { return };
+    let Some(h) = app.store.hist.procs.get(key) else { return };
     if top + 4 > bottom {
         return;
     }
     let chart = Rect { y: top, height: bottom - top, ..inner };
     let [c1, c2] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(2).areas(chart);
     let ctx = app.chart_ctx();
-    let mem = app.hist.tail(&h.mem, ctx.samples(c1.width));
+    let mem = app.store.hist.tail(&h.mem, ctx.samples(c1.width));
     let peak = mem.iter().flatten().copied().fold(0.0f64, f64::max);
     let scale = app.sample(p.gpu).and_then(|g| g.mem_total).map(|v| v as f64).unwrap_or(peak).max(1.0);
     let memn: Vec<Option<f64>> = mem.iter().map(|v| v.map(|x| x / scale)).collect();
@@ -225,7 +225,7 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     label(f, c2, "gpu utilization".into());
     let body = |a: Rect| Rect { y: a.y + 1, height: a.height.saturating_sub(1), ..a };
     ctx.draw(f, body(c1), 900, &[Series { data: &memn, grad: t.mem, down: false }]);
-    ctx.draw(f, body(c2), 901, &[Series { data: app.hist.tail(&h.sm, ctx.samples(c2.width)), grad: t.util, down: false }]);
+    ctx.draw(f, body(c2), 901, &[Series { data: app.store.hist.tail(&h.sm, ctx.samples(c2.width)), grad: t.util, down: false }]);
 }
 
 pub(super) fn tune(f: &mut Frame, app: &App) {

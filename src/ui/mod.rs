@@ -12,6 +12,7 @@ mod overview;
 mod popups;
 mod procs;
 mod recorder;
+mod store;
 mod theme;
 mod timeline;
 mod widgets;
@@ -37,7 +38,6 @@ use crate::collector::{Sampler, Source};
 use crate::config::Config;
 use crate::host::{KillSignal, send_signal};
 use crate::model::{GpuInfo, GpuSample, PidMapping, ProcRow, Snapshot, SystemInfo};
-use history::History;
 
 /// What the UI needs from the command line.
 pub struct UiOptions {
@@ -218,14 +218,8 @@ struct Hit {
 
 struct App {
     info: SystemInfo,
-    /// The snapshot on screen: the newest, or a past one while rewinding.
-    snap: Option<Snapshot>,
-    /// Recent snapshots, oldest first (rewind buffer).
-    past: std::collections::VecDeque<Snapshot>,
-    /// How many snapshots back from the newest we're showing (0 = live).
-    rewind: usize,
-    recorder: Option<recorder::Recorder>,
-    hist: History,
+    /// Snapshots, rewind, chart history, events.
+    store: store::Store,
     tab: Tab,
     sel_gpu: usize,
     /// Visible process rows: indices into `snap.processes`.
@@ -251,9 +245,6 @@ struct App {
     /// The style to persist: only an explicit choice (`G`), never a fallback
     /// forced by the current terminal.
     saved_chart_style: Option<ChartStyle>,
-    /// Bumped on every new snapshot; keys the chart image cache.
-    version: u64,
-    events: std::collections::VecDeque<crate::events::Event>,
     events_scroll: usize,
     keymap: input::Keymap,
     /// Command line being typed after `:`.
@@ -276,11 +267,7 @@ impl App {
         };
         App {
             info,
-            snap: None,
-            past: Default::default(),
-            rewind: 0,
-            recorder: None,
-            hist: History::default(),
+            store: store::Store::default(),
             tab: Tab::Overview,
             sel_gpu: 0,
             view: Vec::new(),
@@ -303,8 +290,6 @@ impl App {
             gfx,
             chart_style,
             saved_chart_style: cfg.chart_style,
-            version: 0,
-            events: Default::default(),
             events_scroll: 0,
             keymap: input::Keymap::new(&cfg.keys),
             cmd_edit: None,
@@ -324,12 +309,17 @@ impl App {
         self.info.gpus.get(i)
     }
 
+    /// The snapshot on screen (live, or a past one while rewinding).
+    fn snap(&self) -> Option<&Snapshot> {
+        self.store.current()
+    }
+
     fn sample(&self, i: usize) -> Option<&GpuSample> {
-        self.snap.as_ref()?.gpus.get(i)
+        self.snap()?.gpus.get(i)
     }
 
     fn procs(&self) -> &[ProcRow] {
-        self.snap.as_ref().map(|s| s.processes.as_slice()).unwrap_or(&[])
+        self.snap().map(|s| s.processes.as_slice()).unwrap_or(&[])
     }
 
     /// Visible rows in display order.
@@ -347,7 +337,7 @@ impl App {
     }
 
     fn power_frac(&self, i: usize, s: &GpuSample) -> Option<f64> {
-        self.hist.power_frac(i, s, self.gpu(i)?.power_limit_max)
+        self.store.hist.power_frac(i, s, self.gpu(i)?.power_limit_max)
     }
 
     fn chart_ctx(&self) -> gfx::ChartCtx<'_> {
@@ -355,52 +345,18 @@ impl App {
             Some((r, g, b)) => ratatui::style::Color::Rgb(r, g, b),
             None => ratatui::style::Color::Rgb(0x1a, 0x1b, 0x26),
         };
-        gfx::ChartCtx { gfx: &self.gfx, style: self.chart_style, version: self.version, theme: self.theme, bg }
-    }
-
-    /// Seed history and the rewind buffer from a previous session's recording.
-    fn replay(&mut self, past: Vec<Snapshot>) {
-        for s in past {
-            self.hist.push(&self.info, &s);
-            self.past.push_back(s);
-        }
-        self.snap = self.past.back().cloned();
-        self.refresh_view();
+        gfx::ChartCtx { gfx: &self.gfx, style: self.chart_style, version: self.store.version, theme: self.theme, bg }
     }
 
     fn ingest(&mut self, s: Snapshot) {
-        if let Some(r) = &mut self.recorder
-            && r.append(&s)
-        {
-            r.rewrite(self.past.iter());
-        }
-        self.past.push_back(s.clone());
-        if self.past.len() > recorder::KEEP {
-            self.past.pop_front();
-        }
-        self.hist.push(&self.info, &s);
         self.alerts.handle(&s.events);
-        self.events.extend(s.events.iter().cloned());
-        while self.events.len() > 2000 {
-            self.events.pop_front();
-        }
         self.tagged.retain(|k| s.processes.iter().any(|p| p.key() == *k));
-        self.version += 1;
-        if self.rewind > 0 {
-            // Stay on the same moment while new data arrives.
-            self.set_rewind(self.rewind + 1);
-        } else {
-            self.snap = Some(s);
-            self.refresh_view();
-        }
+        self.store.ingest(&self.info, s, self.interval.as_secs_f64());
+        self.refresh_view();
     }
 
     fn set_rewind(&mut self, n: usize) {
-        let n = n.min(self.past.len().saturating_sub(1));
-        self.rewind = n;
-        self.hist.back = n;
-        self.snap = self.past.get(self.past.len().saturating_sub(1 + n)).cloned();
-        self.version += 1;
+        self.store.set_rewind(n);
         self.refresh_view();
     }
 
@@ -556,7 +512,7 @@ impl App {
                     Action::PageUp => -20,
                     _ => 20,
                 };
-                self.events_scroll = self.events_scroll.saturating_add_signed(d).min(self.events.len().saturating_sub(1));
+                self.events_scroll = self.events_scroll.saturating_add_signed(d).min(self.store.events.len().saturating_sub(1));
             }
             Action::Up => self.move_sel(-1),
             Action::Down => self.move_sel(1),
@@ -615,10 +571,10 @@ impl App {
             }
             Action::Slower => self.set_interval(sampler, false),
             Action::Faster => self.set_interval(sampler, true),
-            Action::RewindBack => self.set_rewind(self.rewind + 10),
-            Action::RewindBackFar => self.set_rewind(self.rewind + 60),
-            Action::RewindForward => self.set_rewind(self.rewind.saturating_sub(10)),
-            Action::RewindForwardFar => self.set_rewind(self.rewind.saturating_sub(60)),
+            Action::RewindBack => self.set_rewind(self.store.rewind + 10),
+            Action::RewindBackFar => self.set_rewind(self.store.rewind + 60),
+            Action::RewindForward => self.set_rewind(self.store.rewind.saturating_sub(10)),
+            Action::RewindForwardFar => self.set_rewind(self.store.rewind.saturating_sub(60)),
             Action::Live => self.set_rewind(0),
             Action::Tune => self.open_tune(),
         }
@@ -898,10 +854,9 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
         forced => gfx::Gfx::detect(Some(forced)),
     };
     let mut app = App::new(info, interval, opts, &cfg, gfx);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    let (rec, past) = recorder::Recorder::open(&app.info, now);
-    app.recorder = Some(rec);
-    app.replay(past);
+    let record = !app.info.gpus.iter().all(|g| g.vendor == crate::model::Vendor::Demo);
+    app.store = store::Store::open(&app.info, interval.as_secs_f64(), record);
+    app.refresh_view();
     if app.chart_ctx().pixels() {
         app.toast(format!("charts: pixels ({}) · press G if they stay empty", app.gfx.protocol_name()), false);
     }

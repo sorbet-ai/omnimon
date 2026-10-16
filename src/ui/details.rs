@@ -130,7 +130,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
         ),
         ("Energy", o(sm.energy_joules.map(|j| format!("{:.3} kWh since driver load", j / 3.6e6)))),
         ("This session", {
-            let j = app.hist.gpus.get(i).map(|h| h.energy).unwrap_or(0.0);
+            let j = app.store.hist.gpus.get(i).map(|h| h.energy).unwrap_or(0.0);
             format!("{:.1} Wh{}", j / 3600.0, app.price_per_kwh.map(|p| format!(" · ≈{:.3} at {p}/kWh", j / 3.6e6 * p)).unwrap_or_default())
         }),
         ("Performance state", o(sm.pstate.map(|p| format!("P{p}")))),
@@ -187,8 +187,8 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
     let title = |x: &str| Line::from(vec![s(format!(" {x} "), t.title).bold(), s(format!("GPU {i} "), t.dim)]);
     f.render_widget(Paragraph::new(kv(device)).wrap(Wrap { trim: false }).block(block(t, false).title_top(title("Device"))), l);
     // Diagnosis above the live values.
-    let recent = app.hist.gpus.get(i).map(|h| {
-        let w: Vec<f64> = h.util.window(60, app.hist.back).iter().flatten().map(|v| v * 100.0).collect();
+    let recent = app.store.hist.gpus.get(i).map(|h| {
+        let w: Vec<f64> = app.store.hist.tail(&h.util, 60).iter().flatten().map(|v| v * 100.0).collect();
         crate::diagnose::Recent { util_avg: (!w.is_empty()).then(|| w.iter().sum::<f64>() / w.len() as f64), samples: w.len() }
     });
     let procs: Vec<&crate::model::ProcRow> = app.procs().iter().filter(|p| p.gpu == i).collect();
