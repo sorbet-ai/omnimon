@@ -164,23 +164,25 @@ fn cell<'a>(col: Col, p: &ProcRow, c: &Ctx) -> Cell<'a> {
 
 pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
     let t = app.theme();
-    let shown = app.view.len();
+    let shown = app.view.rows.len();
     let total = app.procs().len();
     let mut title = vec![s(" Processes ", t.title).bold(), s(format!("{shown} "), t.dim)];
     if shown != total {
         title.push(s(format!("of {total} "), t.dim));
     }
-    if app.gpu_only {
+    if app.view.gpu_only {
         title.push(s(format!("· GPU {} only ", app.sel_gpu), t.accent));
     }
-    if !app.tagged.is_empty() {
-        title.push(s(format!("· {} tagged ", app.tagged.len()), t.accent2));
+    if !app.view.tagged.is_empty() {
+        title.push(s(format!("· {} tagged ", app.view.tagged.len()), t.accent2));
     }
     let mut b = block(t, true).title_top(Line::from(title));
-    if app.filter_edit {
-        b = b.title_top(Line::from(vec![s(" / ", t.accent).bold(), s(app.spec.filter.as_str(), t.fg), s("▏ ", t.accent)]).right_aligned());
-    } else if !app.spec.filter.is_empty() {
-        b = b.title_top(Line::from(vec![s(" filter: ", t.dim), s(app.spec.filter.as_str(), t.accent), s(" ", t.dim)]).right_aligned());
+    if app.view.filter_edit {
+        b = b.title_top(
+            Line::from(vec![s(" / ", t.accent).bold(), s(app.view.spec.filter.as_str(), t.fg), s("▏ ", t.accent)]).right_aligned(),
+        );
+    } else if !app.view.spec.filter.is_empty() {
+        b = b.title_top(Line::from(vec![s(" filter: ", t.dim), s(app.view.spec.filter.as_str(), t.accent), s(" ", t.dim)]).right_aligned());
     }
     let inner = b.inner(area);
 
@@ -210,9 +212,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
     let cmd_w = inner.width.saturating_sub(fixed).max(10);
     let width_of = |c: Col| if c.width() == 0 { cmd_w } else { c.width() };
 
-    let arrow = if app.spec.desc { "▼" } else { "▲" };
+    let arrow = if app.view.spec.desc { "▼" } else { "▲" };
     let header = Row::new(cols.iter().map(|&c| {
-        let active = c.sort() == Some(app.spec.sort);
+        let active = c.sort() == Some(app.view.spec.sort);
         let label = if active { format!("{}{arrow}", c.header()) } else { c.header().to_string() };
         let line = Line::from(label).style(if active { Style::new().fg(t.accent).bold() } else { Style::new().fg(t.dim).bold() });
         Cell::from(if c.right() { line.right_aligned() } else { line })
@@ -245,9 +247,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             let ctx = Ctx {
                 t,
                 base,
-                tagged: app.tagged.contains(&p.key()),
+                tagged: app.view.tagged.contains(&p.key()),
                 gpu_total: app.sample(p.gpu).and_then(|g| g.mem_total),
-                full_cmd: app.full_cmd,
+                full_cmd: app.view.full_cmd,
                 cmd_w,
             };
             Row::new(cols.iter().map(|&c| cell(c, p, &ctx))).style(base)
@@ -262,11 +264,11 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         .highlight_symbol("▌ ")
         .highlight_spacing(HighlightSpacing::Always)
         .block(b);
-    f.render_stateful_widget(table, area, &mut app.table.borrow_mut());
+    f.render_stateful_widget(table, area, &mut app.view.table.borrow_mut());
     if empty {
         let msg = if app.info.host.wsl {
             "WSL doesn't expose GPU processes (driver limitation); run on Windows to see them"
-        } else if !app.spec.filter.is_empty() {
+        } else if !app.view.spec.filter.is_empty() {
             "no processes match the filter"
         } else {
             "no GPU processes"

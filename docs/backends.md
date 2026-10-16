@@ -20,7 +20,7 @@ real hardware during development.
   parallel threads.
 - `nvmlDeviceGetProcessUtilization` is queried with a ~1 s lookback.
 - WDDM (Windows): per-process memory is `NVML_VALUE_NOT_AVAILABLE`; filled in
-  from WDDM performance counters (`src/winpdh.rs`).
+  from WDDM performance counters (`src/os/windows.rs`).
 - WSL2: no process lists at all (driver limitation; nvidia-smi shows none).
 
 ### Not yet implemented
@@ -36,7 +36,8 @@ real hardware during development.
   (Ampere+ `GetPowerUsage` is a 1 s average). Verify the field id against nvml.h.
 - `nvmlDeviceGetRunningProcessDetailList` (r550+, struct-versioned): avoids
   layout guessing entirely.
-- Xid / ECC events via `nvmlEventSetCreate` (an event timeline in the UI).
+- Xid / ECC events via `nvmlEventSetCreate` (the event timeline exists; it
+  currently sees ECC counts and errors, not Xids).
 
 ## Apple Silicon, verified on M4 Pro (macOS 26)
 
@@ -73,7 +74,7 @@ real hardware during development.
 - AMD SMI (`libamd_smi.so`) could be dlopened for Instinct parts; the ABI
   changes between ROCm releases.
 
-## Intel on Linux (not implemented)
+## Intel on Linux, experimental (`src/backend/intel.rs`, fake-sysfs tested)
 
 - fdinfo: i915 `drm-engine-{render,copy,video,video-enhance}` ns (+
   `drm-engine-capacity-*`); xe `drm-cycles-*` / `drm-total-cycles-*`
@@ -81,15 +82,22 @@ real hardware during development.
 - sysfs freq: `gt_act_freq_mhz` / `gt/gt0/rps_act_freq_mhz`; xe
   `device/tile0/gt0/freq0/act_freq`. hwmon for dGPU power/temp/fans.
 - PMU (`perf_event_open`, intel_gpu_top) needs CAP_PERFMON; avoid by default.
+- Discrete vs integrated: local-memory size (`tile0/physical_vram_size_bytes`,
+  `lmem_total_bytes`), hwmon presence, or a discrete Arc device id.
 
-## Windows, any vendor (partially implemented)
+## Windows, any vendor (`src/backend/wddm.rs` + `src/os/windows.rs`)
 
 - `\GPU Engine(*)\Utilization Percentage`, instance
   `pid_<pid>_luid_0x<hi>_0x<lo>_phys_<n>_eng_<m>_engtype_<type>`; per process =
   max over engines (Task Manager's rule).
 - `\GPU Process Memory(*)\Dedicated Usage` / `Shared Usage`.
 - `\GPU Adapter Memory(*)\Dedicated Usage` for device totals.
-- LUID → PCI via `D3DKMTEnumAdapters2` + `D3DKMTQueryAdapterInfo
-  (KMTQAITYPE_ADAPTERADDRESS)`. Implemented in `src/winpdh.rs` and used to
-  enrich NVML. A standalone WDDM backend would also cover AMD and Intel on
-  Windows (add ADLX for AMD clocks, temperatures and power).
+- `\GPU Process Memory(*)\Shared Usage` on a discrete GPU is spill (measured,
+  not estimated); on an integrated GPU it is simply its memory.
+- Adapters via `D3DKMTEnumAdapters2` + `D3DKMTQueryAdapterInfo`: address (6,
+  LUID → PCI), registry info (8, name), segment sizes (3), adapter type (15:
+  render/software/indirect-display/hybrid flags; WARP, virtual displays and
+  compute-only NPUs are skipped, GPU-P adapters in VMs kept), device ids (31).
+- Used two ways: to enrich NVML's per-process data, and as a standalone
+  backend for AMD and Intel (and NVIDIA without NVML). No clocks, power or
+  temperature this way; ADLX (AMD) and IGCL (Intel) would add them.

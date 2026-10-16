@@ -34,6 +34,7 @@ impl Vendor {
 
 /// Information about a backend (one per vendor library that loaded).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BackendInfo {
     /// Data source, e.g. "NVML", "IOKit", "amdgpu sysfs".
     pub name: String,
@@ -48,6 +49,7 @@ pub struct BackendInfo {
 
 /// Mostly-static properties of a GPU, queried once.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GpuInfo {
     /// Position in `SystemInfo::gpus`; assigned by the collector.
     pub index: usize,
@@ -208,6 +210,7 @@ pub enum PidScope {
 
 /// A process as reported by a GPU backend.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GpuProcess {
     pub pid: u32,
     pub scope: PidScope,
@@ -241,6 +244,7 @@ pub enum SpillLevel {
 
 /// Result of spill analysis for one GPU (see `spill.rs`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Spill {
     pub level: SpillLevel,
     /// Bytes of GPU allocations living in system memory.
@@ -253,6 +257,7 @@ pub struct Spill {
 
 /// One sampling of a GPU's dynamic state.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GpuSample {
     pub util_gpu: Option<f32>,
     pub util_mem: Option<f32>,
@@ -313,10 +318,11 @@ impl GpuSample {
 
 /// How a driver-reported PID was mapped to a process we can see.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PidMapping {
     /// Same PID namespace; PID is ours.
+    #[default]
     Direct,
     /// Driver PID belongs to another namespace (container); we found the
     /// matching local process.
@@ -329,7 +335,8 @@ pub enum PidMapping {
 
 /// A GPU process joined with host-side information. This is what the
 /// process table shows.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProcRow {
     pub gpu: usize,
     /// What the GPU backend reported (pid is in `usage.scope`'s namespace).
@@ -363,6 +370,7 @@ impl ProcRow {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HostInfo {
     pub hostname: String,
     pub os: String,
@@ -375,6 +383,7 @@ pub struct HostInfo {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HostSample {
     pub cpu: f32,
     pub per_core: Vec<f32>,
@@ -396,6 +405,7 @@ pub struct HostSample {
 
 /// Everything known at startup.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SystemInfo {
     pub host: HostInfo,
     pub backends: Vec<BackendInfo>,
@@ -412,6 +422,7 @@ impl SystemInfo {
 
 /// One full tick of data.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Snapshot {
     /// Unix time, seconds.
     pub timestamp: f64,

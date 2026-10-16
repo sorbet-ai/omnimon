@@ -11,6 +11,7 @@ mod input;
 mod overview;
 mod popups;
 mod procs;
+mod procview;
 mod recorder;
 mod store;
 mod theme;
@@ -19,8 +20,8 @@ mod widgets;
 
 pub use gfx::ChartStyle;
 pub use input::Action;
+pub use procview::SortKey;
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -31,8 +32,6 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
-use ratatui::widgets::TableState;
-use serde::{Deserialize, Serialize};
 
 use crate::collector::{Sampler, Source};
 use crate::config::Config;
@@ -73,49 +72,15 @@ impl Tab {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortKey {
-    GpuMem,
-    SharedMem,
-    Sm,
-    Cpu,
-    Rss,
-    Time,
-    Pid,
-    User,
-    Name,
-    Gpu,
-}
-
-impl SortKey {
-    const CYCLE: [SortKey; 10] = [
-        SortKey::GpuMem,
-        SortKey::SharedMem,
-        SortKey::Sm,
-        SortKey::Cpu,
-        SortKey::Rss,
-        SortKey::Time,
-        SortKey::Pid,
-        SortKey::User,
-        SortKey::Name,
-        SortKey::Gpu,
-    ];
-    /// Natural direction: numbers biggest-first, text A-Z.
-    fn default_desc(self) -> bool {
-        !matches!(self, SortKey::Pid | SortKey::User | SortKey::Name | SortKey::Gpu)
-    }
-    fn step(self, d: isize) -> SortKey {
-        let i = Self::CYCLE.iter().position(|&s| s == self).unwrap_or(0) as isize;
-        Self::CYCLE[(i + d).rem_euclid(Self::CYCLE.len() as isize) as usize]
-    }
-}
-
 /// Overview panels that can be hidden (`:hide host`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Panel {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Panel {
+    #[serde(rename = "gpus", alias = "gpu", alias = "cards")]
     Cards,
+    #[serde(alias = "cpu", alias = "system")]
     Host,
+    #[serde(alias = "processes", alias = "table")]
     Procs,
 }
 
@@ -136,53 +101,6 @@ impl Panel {
             _ => None,
         }
     }
-}
-
-/// How the process list is filtered and ordered.
-#[derive(Clone, Debug)]
-struct ViewSpec {
-    filter: String,
-    gpu: Option<usize>,
-    sort: SortKey,
-    desc: bool,
-}
-
-/// Indices into `procs`, filtered and sorted per `v`. Pure, so it is tested.
-fn filter_sort(procs: &[ProcRow], v: &ViewSpec) -> Vec<usize> {
-    let f = filter::Filter::parse(&v.filter);
-    let mut idx: Vec<usize> = (0..procs.len()).filter(|&i| v.gpu.is_none_or(|g| procs[i].gpu == g) && f.matches(&procs[i])).collect();
-    // Sorting by a column nobody reports (GPU memory under WDDM without
-    // counters, Apple) is useless; fall back to GPU utilization.
-    let key = match v.sort {
-        SortKey::GpuMem if idx.iter().all(|&i| procs[i].usage.gpu_mem.is_none()) => SortKey::Sm,
-        k => k,
-    };
-    let num = |p: &ProcRow| -> f64 {
-        let u = &p.usage;
-        match key {
-            SortKey::GpuMem => u.gpu_mem.map(|v| v as f64),
-            SortKey::SharedMem => u.gpu_mem_shared.map(|v| v as f64),
-            SortKey::Sm => u.sm_util.map(f64::from),
-            SortKey::Cpu => p.cpu.map(f64::from),
-            SortKey::Rss => p.rss.map(|v| v as f64),
-            SortKey::Time => p.runtime.map(|v| v as f64),
-            _ => None,
-        }
-        .unwrap_or(-1.0)
-    };
-    idx.sort_by(|&a, &b| {
-        let (pa, pb) = (&procs[a], &procs[b]);
-        let o = match key {
-            SortKey::Pid => pa.pid().cmp(&pb.pid()),
-            SortKey::User => pa.user.cmp(&pb.user),
-            SortKey::Name => pa.name.to_lowercase().cmp(&pb.name.to_lowercase()),
-            SortKey::Gpu => pa.gpu.cmp(&pb.gpu),
-            _ => num(pa).total_cmp(&num(pb)),
-        };
-        let o = if v.desc { o.reverse() } else { o };
-        o.then(pa.gpu.cmp(&pb.gpu)).then(pa.pid().cmp(&pb.pid()))
-    });
-    idx
 }
 
 enum Popup {
@@ -222,15 +140,8 @@ struct App {
     store: store::Store,
     tab: Tab,
     sel_gpu: usize,
-    /// Visible process rows: indices into `snap.processes`.
-    view: Vec<usize>,
-    spec: ViewSpec,
-    gpu_only: bool,
-    table: RefCell<TableState>,
-    sel_key: Option<(usize, u32)>,
-    filter_edit: bool,
-    full_cmd: bool,
-    tagged: HashSet<(usize, u32)>,
+    /// The process list: filter, sort, selection, tags.
+    view: procview::ProcView,
     popup: Option<Popup>,
     toast: Option<(String, Instant, bool)>,
     theme: usize,
@@ -259,7 +170,6 @@ struct App {
 impl App {
     fn new(info: SystemInfo, interval: Duration, opts: &UiOptions, cfg: &Config, gfx: gfx::Gfx) -> Self {
         let theme = opts.theme.clone().or(crate::brand::env("THEME")).or(cfg.theme.clone()).and_then(|t| theme::by_name(&t)).unwrap_or(0);
-        let sort = cfg.sort.unwrap_or(SortKey::GpuMem);
         let chart_style = match cfg.chart_style {
             Some(ChartStyle::Pixels) | None if gfx.pixels_available() => ChartStyle::Pixels,
             Some(ChartStyle::Pixels) | None => ChartStyle::Blocks,
@@ -270,14 +180,7 @@ impl App {
             store: store::Store::default(),
             tab: Tab::Overview,
             sel_gpu: 0,
-            view: Vec::new(),
-            spec: ViewSpec { filter: String::new(), gpu: None, sort, desc: cfg.sort_desc.unwrap_or(sort.default_desc()) },
-            gpu_only: false,
-            table: RefCell::new(TableState::default().with_selected(Some(0))),
-            sel_key: None,
-            filter_edit: false,
-            full_cmd: cfg.full_cmd.unwrap_or(false),
-            tagged: HashSet::new(),
+            view: procview::ProcView::new(cfg.sort.unwrap_or(SortKey::GpuMem), cfg.sort_desc, cfg.full_cmd.unwrap_or(false)),
             popup: None,
             toast: None,
             theme,
@@ -293,7 +196,7 @@ impl App {
             events_scroll: 0,
             keymap: input::Keymap::new(&cfg.keys),
             cmd_edit: None,
-            hidden: cfg.hidden.iter().filter_map(|h| Panel::parse(h)).collect(),
+            hidden: cfg.hidden.iter().copied().collect(),
             remote: opts.remote.clone(),
             alerts: crate::alerts::Alerts::new(cfg.alert_command.clone(), cfg.alert_min),
             price_per_kwh: cfg.price_per_kwh,
@@ -325,7 +228,7 @@ impl App {
     /// Visible rows in display order.
     fn rows(&self) -> impl Iterator<Item = &ProcRow> {
         let all = self.procs();
-        self.view.iter().filter_map(move |&i| all.get(i))
+        self.view.rows.iter().filter_map(move |&i| all.get(i))
     }
 
     fn row_by_key(&self, key: (usize, u32)) -> Option<&ProcRow> {
@@ -333,7 +236,7 @@ impl App {
     }
 
     fn row(&self, n: usize) -> Option<&ProcRow> {
-        self.procs().get(*self.view.get(n)?)
+        self.view.row(self.procs(), n)
     }
 
     fn power_frac(&self, i: usize, s: &GpuSample) -> Option<f64> {
@@ -350,7 +253,7 @@ impl App {
 
     fn ingest(&mut self, s: Snapshot) {
         self.alerts.handle(&s.events);
-        self.tagged.retain(|k| s.processes.iter().any(|p| p.key() == *k));
+        self.view.tagged.retain(|k| s.processes.iter().any(|p| p.key() == *k));
         self.store.ingest(&self.info, s, self.interval.as_secs_f64());
         self.refresh_view();
     }
@@ -362,34 +265,17 @@ impl App {
 
     /// Recompute visible rows and keep the selection on the same process.
     fn refresh_view(&mut self) {
-        self.spec.gpu = self.gpu_only.then_some(self.sel_gpu);
-        self.view = filter_sort(self.procs(), &self.spec);
-        let n = self.view.len();
-        let idx = self
-            .sel_key
-            .and_then(|k| self.rows().position(|p| p.key() == k))
-            .unwrap_or_else(|| self.table.borrow().selected().unwrap_or(0).min(n.saturating_sub(1)));
-        self.sel_key = self.row(idx).map(ProcRow::key);
-        self.table.borrow_mut().select(if n == 0 { None } else { Some(idx) });
+        let procs = self.store.current().map(|s| s.processes.as_slice()).unwrap_or(&[]);
+        self.view.refresh(procs, self.sel_gpu);
     }
 
     fn move_sel(&mut self, delta: isize) {
-        if self.view.is_empty() {
-            return;
-        }
-        let cur = self.table.borrow().selected().unwrap_or(0) as isize;
-        let idx = cur.saturating_add(delta).clamp(0, self.view.len() as isize - 1) as usize;
-        self.sel_key = self.row(idx).map(ProcRow::key);
-        self.table.borrow_mut().select(Some(idx));
+        let procs = self.store.current().map(|s| s.processes.as_slice()).unwrap_or(&[]);
+        self.view.move_sel(procs, delta);
     }
 
     fn set_sort(&mut self, k: SortKey) {
-        if self.spec.sort == k {
-            self.spec.desc = !self.spec.desc;
-        } else {
-            self.spec.sort = k;
-            self.spec.desc = k.default_desc();
-        }
+        self.view.set_sort(k);
         self.refresh_view();
     }
 
@@ -407,10 +293,10 @@ impl App {
             return;
         }
         // Tagged processes, even those hidden by the current filter; else the selection.
-        let sel: Vec<&ProcRow> = if self.tagged.is_empty() {
-            self.table.borrow().selected().and_then(|i| self.row(i)).into_iter().collect()
+        let sel: Vec<&ProcRow> = if self.view.tagged.is_empty() {
+            self.view.table.borrow().selected().and_then(|i| self.row(i)).into_iter().collect()
         } else {
-            self.procs().iter().filter(|p| self.tagged.contains(&p.key())).collect()
+            self.procs().iter().filter(|p| self.view.tagged.contains(&p.key())).collect()
         };
         let mut targets = Vec::new();
         let mut skipped = 0;
@@ -445,17 +331,17 @@ impl App {
             self.on_popup_key(k);
             return;
         }
-        if self.filter_edit {
+        if self.view.filter_edit {
             match k.code {
                 KeyCode::Esc => {
-                    self.spec.filter.clear();
-                    self.filter_edit = false;
+                    self.view.spec.filter.clear();
+                    self.view.filter_edit = false;
                 }
-                KeyCode::Enter => self.filter_edit = false,
+                KeyCode::Enter => self.view.filter_edit = false,
                 KeyCode::Backspace => {
-                    self.spec.filter.pop();
+                    self.view.spec.filter.pop();
                 }
-                KeyCode::Char(c) => self.spec.filter.push(c),
+                KeyCode::Char(c) => self.view.spec.filter.push(c),
                 _ => {}
             }
             self.refresh_view();
@@ -482,11 +368,11 @@ impl App {
             return;
         }
         if k.code == KeyCode::Esc {
-            if !self.spec.filter.is_empty() {
-                self.spec.filter.clear();
+            if !self.view.spec.filter.is_empty() {
+                self.view.spec.filter.clear();
                 self.refresh_view();
-            } else if !self.tagged.is_empty() {
-                self.tagged.clear();
+            } else if !self.view.tagged.is_empty() {
+                self.view.tagged.clear();
             } else {
                 self.quit = true;
             }
@@ -527,32 +413,32 @@ impl App {
                 self.refresh_view();
             }
             Action::SortNext | Action::SortPrev => {
-                let k = self.spec.sort.step(if a == Action::SortPrev { -1 } else { 1 });
-                self.spec.sort = k;
-                self.spec.desc = k.default_desc();
+                let k = self.view.spec.sort.step(if a == Action::SortPrev { -1 } else { 1 });
+                self.view.spec.sort = k;
+                self.view.spec.desc = k.default_desc();
                 self.refresh_view();
             }
             Action::SortReverse => {
-                self.spec.desc = !self.spec.desc;
+                self.view.spec.desc = !self.view.spec.desc;
                 self.refresh_view();
             }
-            Action::Filter => self.filter_edit = true,
+            Action::Filter => self.view.filter_edit = true,
             Action::Command => self.cmd_edit = Some(String::new()),
             Action::GpuOnly => {
-                self.gpu_only = !self.gpu_only;
+                self.view.gpu_only = !self.view.gpu_only;
                 self.refresh_view();
             }
-            Action::FullCommand => self.full_cmd = !self.full_cmd,
+            Action::FullCommand => self.view.full_cmd = !self.view.full_cmd,
             Action::Tag => {
-                if let Some(key) = self.sel_key {
-                    if !self.tagged.remove(&key) {
-                        self.tagged.insert(key);
+                if let Some(key) = self.view.sel_key {
+                    if !self.view.tagged.remove(&key) {
+                        self.view.tagged.insert(key);
                     }
                     self.move_sel(1);
                 }
             }
             Action::ProcessDetails => {
-                if let Some(key) = self.sel_key {
+                if let Some(key) = self.view.sel_key {
                     // Process details come from this machine's process table.
                     let local = if self.remote.is_some() { None } else { self.row_by_key(key).and_then(|p| p.local_pid) };
                     let details = local.and_then(crate::host::process_details).map(Box::new);
@@ -589,7 +475,7 @@ impl App {
         let arg = rest.first().copied().unwrap_or("");
         match cmd {
             "q" | "quit" => {
-                self.quit = true;
+                self.apply(Action::Quit, sampler);
                 Ok(String::new())
             }
             "theme" => {
@@ -599,36 +485,25 @@ impl App {
                 Ok(format!("theme: {arg}"))
             }
             "sort" => {
-                let key = SortKey::CYCLE
-                    .iter()
-                    .copied()
-                    .find(|k| serde_json::to_value(k).ok().and_then(|v| v.as_str().map(|s| s == arg)).unwrap_or(false))
-                    .or(match arg {
-                        "mem" | "vram" => Some(SortKey::GpuMem),
-                        "spill" | "shared" | "sys" => Some(SortKey::SharedMem),
-                        "util" | "gpu%" => Some(SortKey::Sm),
-                        "ram" => Some(SortKey::Rss),
-                        "command" | "cmd" => Some(SortKey::Name),
-                        _ => None,
-                    })
-                    .ok_or("sort by: gpu_mem shared_mem sm cpu rss time pid user name gpu")?;
-                self.spec.sort = key;
-                self.spec.desc = match rest.get(1) {
+                let key = SortKey::parse(arg)
+                    .ok_or_else(|| format!("sort by: {}", SortKey::CYCLE.iter().map(|k| k.name()).collect::<Vec<_>>().join(" ")))?;
+                self.view.spec.sort = key;
+                self.view.spec.desc = match rest.get(1) {
                     Some(&"asc") => false,
                     Some(&"desc") => true,
                     _ => key.default_desc(),
                 };
                 self.refresh_view();
-                Ok(format!("sorted by {arg}"))
+                Ok(format!("sorted by {}", key.name()))
             }
             "filter" | "f" => {
-                self.spec.filter = rest.join(" ");
+                self.view.spec.filter = rest.join(" ");
                 self.refresh_view();
                 Ok(String::new())
             }
             "clear" => {
-                self.spec.filter.clear();
-                self.tagged.clear();
+                self.view.spec.filter.clear();
+                self.view.tagged.clear();
                 self.refresh_view();
                 Ok("cleared".into())
             }
@@ -681,7 +556,7 @@ impl App {
                 Ok(String::new())
             }
             "help" => {
-                self.popup = Some(Popup::Help);
+                self.apply(Action::Help, sampler);
                 Ok(String::new())
             }
             _ => Err(format!("unknown command {cmd:?}: theme sort filter clear hide show charts interval gpu view quit")),
@@ -743,7 +618,7 @@ impl App {
                             match send_signal(*local, sig) {
                                 Ok(()) => {
                                     ok += 1;
-                                    self.tagged.remove(&(*gpu, *pid));
+                                    self.view.tagged.remove(&(*gpu, *pid));
                                 }
                                 Err(e) => errs.push(e),
                             }
@@ -819,10 +694,10 @@ impl App {
                         self.set_sort(k);
                     }
                 } else if inside(self.hit.proc_body) {
-                    let idx = self.table.borrow().offset() + (m.row - self.hit.proc_body.y) as usize;
+                    let idx = self.view.table.borrow().offset() + (m.row - self.hit.proc_body.y) as usize;
                     if let Some(key) = self.row(idx).map(ProcRow::key) {
-                        self.sel_key = Some(key);
-                        self.table.borrow_mut().select(Some(idx));
+                        self.view.sel_key = Some(key);
+                        self.view.table.borrow_mut().select(Some(idx));
                     }
                 }
             }
@@ -831,18 +706,14 @@ impl App {
     }
 
     fn save_config(&self) {
-        crate::config::save(&Config {
-            theme: Some(self.theme().name.to_string()),
-            interval: Some(self.interval.as_secs_f64()),
-            sort: Some(self.spec.sort),
-            sort_desc: Some(self.spec.desc),
-            full_cmd: Some(self.full_cmd),
-            chart_style: self.saved_chart_style,
-            hidden: self.hidden.iter().map(|p| p.name().to_string()).collect(),
-            keys: Default::default(),
-            alert_command: None,
-            alert_min: None,
-            price_per_kwh: None,
+        crate::config::update(|c| {
+            c.theme = Some(self.theme().name.to_string());
+            c.interval = Some(self.interval.as_secs_f64());
+            c.sort = Some(self.view.spec.sort);
+            c.sort_desc = Some(self.view.spec.desc);
+            c.full_cmd = Some(self.view.full_cmd);
+            c.chart_style = self.saved_chart_style;
+            c.hidden = Panel::ALL.into_iter().filter(|p| self.hidden.contains(p)).collect();
         });
     }
 }
@@ -937,62 +808,4 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
     crate::logging::capture(false);
     app.save_config();
     res
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::GpuProcess;
-
-    fn row(gpu: usize, pid: u32, mem: Option<u64>, sm: Option<f32>, cmd: &str) -> ProcRow {
-        ProcRow {
-            gpu,
-            usage: GpuProcess { pid, gpu_mem: mem, sm_util: sm, ..Default::default() },
-            local_pid: Some(pid),
-            mapping: PidMapping::Direct,
-            name: cmd.split(' ').next().unwrap_or("").into(),
-            cmdline: cmd.into(),
-            user: Some("alice".into()),
-            cpu: None,
-            rss: None,
-            runtime: None,
-            spilling: false,
-            container: None,
-        }
-    }
-
-    fn spec(sort: SortKey) -> ViewSpec {
-        ViewSpec { filter: String::new(), gpu: None, sort, desc: sort.default_desc() }
-    }
-
-    #[test]
-    fn sorts_by_memory_desc_with_none_last() {
-        let p = [row(0, 1, Some(10), None, "a"), row(0, 2, None, None, "b"), row(0, 3, Some(30), None, "c")];
-        assert_eq!(filter_sort(&p, &spec(SortKey::GpuMem)), [2, 0, 1]);
-    }
-
-    #[test]
-    fn memory_sort_falls_back_to_utilization() {
-        let p = [row(0, 1, None, Some(5.0), "a"), row(0, 2, None, Some(50.0), "b")];
-        assert_eq!(filter_sort(&p, &spec(SortKey::GpuMem)), [1, 0]);
-    }
-
-    #[test]
-    fn filters_by_text_pid_and_gpu() {
-        let p = [row(0, 1, None, None, "python train.py"), row(1, 22, None, None, "ollama serve")];
-        let mut v = spec(SortKey::Pid);
-        v.filter = "TRAIN".into();
-        assert_eq!(filter_sort(&p, &v), [0]);
-        v.filter = "22".into();
-        assert_eq!(filter_sort(&p, &v), [1]);
-        v.filter.clear();
-        v.gpu = Some(1);
-        assert_eq!(filter_sort(&p, &v), [1]);
-    }
-
-    #[test]
-    fn ties_break_by_gpu_then_pid() {
-        let p = [row(1, 5, Some(1), None, "x"), row(0, 9, Some(1), None, "x"), row(0, 3, Some(1), None, "x")];
-        assert_eq!(filter_sort(&p, &spec(SortKey::GpuMem)), [2, 1, 0]);
-    }
 }

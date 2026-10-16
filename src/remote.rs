@@ -152,6 +152,21 @@ mod tests {
         assert!(body_of(b"HTTP/1.1 404 Not Found\r\n\r\n").is_err());
     }
 
+    /// Output of an earlier build (`--demo 2 --json`): newer builds must keep
+    /// reading it. Regenerate only when bumping the schema.
+    #[test]
+    fn reads_schema_2_fixture() {
+        let j: JsonIn = serde_json::from_str(include_str!("../tests/fixtures/json_v2.json")).unwrap();
+        assert_eq!(j.schema, 2);
+        assert_eq!(j.system.gpus.len(), 2);
+        assert_eq!(j.snapshot.gpus.len(), 2);
+        assert!(j.snapshot.processes.iter().any(|p| p.name == "python train.py"));
+        // Fields can be missing (older or trimmed producers).
+        let min: JsonIn =
+            serde_json::from_str(r#"{"schema":2,"system":{},"snapshot":{"gpus":[{}],"processes":[{"gpu":0,"pid":7}]}}"#).unwrap();
+        assert_eq!(min.snapshot.processes[0].usage.pid, 7);
+    }
+
     /// Serve one snapshot over the real exporter code path and read it back.
     #[test]
     fn round_trip_through_json() {

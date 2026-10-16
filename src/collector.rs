@@ -17,6 +17,8 @@ pub struct Collector {
     backends: Vec<Box<dyn Backend>>,
     /// Number of GPUs each backend reported at startup.
     counts: Vec<usize>,
+    /// Global GPU index -> (backend, that backend's own index).
+    gpu_map: Vec<(usize, usize)>,
     gpus: Vec<GpuInfo>,
     host: Host,
     enricher: ProcEnricher,
@@ -28,11 +30,12 @@ impl Collector {
     pub fn new(d: Detected) -> (Self, SystemInfo) {
         let host = Host::new();
         let mut info = SystemInfo { host: host.info.clone(), warnings: d.warnings, ..Default::default() };
-        let mut counts = Vec::new();
+        let (mut counts, mut gpu_map) = (Vec::new(), Vec::new());
         for (bi, b) in d.backends.iter().enumerate() {
             info.backends.push(b.info());
             let gpus = b.gpus();
             counts.push(gpus.len());
+            gpu_map.extend((0..gpus.len()).map(|li| (bi, li)));
             for mut g in gpus {
                 // The collector owns global numbering.
                 g.index = info.gpus.len();
@@ -50,6 +53,7 @@ impl Collector {
         let c = Collector {
             backends: d.backends,
             counts,
+            gpu_map,
             gpus: info.gpus.clone(),
             host,
             enricher,
@@ -61,14 +65,8 @@ impl Collector {
 
     /// Apply a setting to a GPU (global index).
     pub fn apply(&mut self, gpu: usize, cmd: &Tune) -> Result<String, String> {
-        let mut start = 0;
-        for (b, &n) in self.backends.iter_mut().zip(&self.counts) {
-            if gpu < start + n {
-                return b.apply(gpu - start, cmd);
-            }
-            start += n;
-        }
-        Err("no such GPU".into())
+        let &(b, local) = self.gpu_map.get(gpu).ok_or("no such GPU")?;
+        self.backends[b].apply(local, cmd)
     }
 
     pub fn collect(&mut self) -> Snapshot {

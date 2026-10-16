@@ -77,12 +77,16 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     logging::init(if cli.diagnose { log::LevelFilter::Debug } else { log::LevelFilter::Warn });
-    let cfg = config::load();
+    let (cfg, cfg_error) = match config::load() {
+        Ok(c) => (c, None),
+        Err(e) => (config::Config::default(), Some(format!("config ignored: {e}"))),
+    };
     let secs = cli.interval.or(cfg.interval).unwrap_or(1.0);
     let interval = Duration::from_secs_f64(secs.clamp(0.1, 60.0));
 
     if let Some(addr) = &cli.connect {
-        let (source, info, first) = remote::connect(addr)?;
+        let (source, mut info, first) = remote::connect(addr)?;
+        info.warnings.extend(cfg_error);
         if cli.once || cli.json || cli.diagnose {
             if cli.json {
                 report::json(&info, &first, true);
@@ -98,7 +102,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let detected = backend::detect(cli.demo);
-    let (mut collector, info) = Collector::new(detected);
+    let (mut collector, mut info) = Collector::new(detected);
+    info.warnings.extend(cfg_error);
 
     if cli.once || cli.json || cli.diagnose {
         // CPU usage needs two samples spaced >= 200ms apart.

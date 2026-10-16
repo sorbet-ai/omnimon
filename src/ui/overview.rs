@@ -25,7 +25,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
     let procs_on = show(super::Panel::Procs);
     // The process list gets what it needs (within reason); GPU cards grow
     // into the rest, up to a cap, so a lone GPU gets a big chart.
-    let want_procs = if procs_on { (app.view.len() as u16 + 4).clamp(7, 18) } else { 0 };
+    let want_procs = if procs_on { (app.view.rows.len() as u16 + 4).clamp(7, 18) } else { 0 };
     let avail = area.height.saturating_sub(host_h + want_procs);
     let cap = if !procs_on || n == 1 { 13u16.max(avail / n as u16) } else { 10 };
     let per_card = (avail / n as u16).min(cap);

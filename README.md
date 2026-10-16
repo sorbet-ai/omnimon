@@ -188,13 +188,18 @@ src/
   host.rs          CPU/RAM/net/disk, process join, process details, signals
   spill.rs         spill detection and slowdown estimate
   diagnose.rs      "why is it slow?" findings
-  events.rs        event timeline from consecutive snapshots
+  events.rs        event timeline from consecutive snapshots (typed kinds)
+  alerts.rs        alert hook: runs a command for notable events
   report.rs        --once / --json / --diagnose; JsonOut schema
-  serve.rs         --serve exporter
+  serve.rs         --serve exporter (Prometheus + JSON)
+  remote.rs        --connect: a remote --serve as a snapshot source
   config.rs        preferences, config/state directories
   ui/              ratatui TUI: state + input (mod.rs, input.rs, filter.rs),
-                   views (overview, procs, charts, details, timeline, popups),
-                   gfx.rs (pixel/block/braille charts), history, recorder, themes
+                   procview.rs (process list filter/sort/selection),
+                   store.rs (live + rewind snapshots, history, events,
+                   recording via recorder.rs), views (overview, procs, charts,
+                   details, timeline, popups), gfx.rs (pixel/block/braille
+                   charts), themes
 ```
 
 Adding a vendor means implementing `Backend` (static `GpuInfo`, then a

@@ -17,7 +17,7 @@ pub struct Config {
     pub full_cmd: Option<bool>,
     pub chart_style: Option<crate::ui::ChartStyle>,
     /// Overview panels to hide: "gpus", "host", "procs".
-    pub hidden: Vec<String>,
+    pub hidden: Vec<crate::ui::Panel>,
     /// Key overrides per action, e.g. {"kill": ["K", "f9"]}. Hand-edited;
     /// preserved across saves.
     pub keys: std::collections::HashMap<crate::ui::Action, Vec<String>>,
@@ -28,6 +28,9 @@ pub struct Config {
     pub alert_min: Option<crate::events::Severity>,
     /// Electricity price for cost estimates (any currency per kWh).
     pub price_per_kwh: Option<f64>,
+    /// Keys this version doesn't know (from a newer one, or notes): kept on save.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -61,28 +64,49 @@ pub fn state_dir() -> Option<PathBuf> {
     Some(base.join(APP_NAME))
 }
 
-pub fn load() -> Config {
-    path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+/// The config on disk: defaults if there is none, an error if it doesn't parse.
+pub fn load() -> Result<Config, String> {
+    let Some(p) = path() else { return Ok(Config::default()) };
+    match std::fs::read_to_string(&p) {
+        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("{}: {e}", p.display())),
+        Err(_) => Ok(Config::default()),
+    }
 }
 
-/// Best effort; a read-only home (containers) is fine. Hand-edited key
-/// bindings already on disk are kept.
-pub fn save(c: &Config) {
-    // Keep hand-edited settings the UI doesn't manage.
-    let mut c = c.clone();
-    let disk = load();
-    if c.keys.is_empty() {
-        c.keys = disk.keys;
-    }
-    c.alert_command = c.alert_command.or(disk.alert_command);
-    c.alert_min = c.alert_min.or(disk.alert_min);
-    c.price_per_kwh = c.price_per_kwh.or(disk.price_per_kwh);
-    let c = &c;
+/// Change the settings the UI manages, re-reading the file first so hand
+/// edits made meanwhile (and unknown keys) survive. A file that doesn't
+/// parse is never overwritten. Best effort: a read-only home is fine.
+pub fn update(f: impl FnOnce(&mut Config)) {
+    let mut c = match load() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("settings not saved, fix the config first ({e})");
+            return;
+        }
+    };
+    f(&mut c);
     let Some(p) = path() else { return };
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(s) = serde_json::to_string_pretty(c) {
+    if let Ok(s) = serde_json::to_string_pretty(&c) {
         let _ = std::fs::write(p, s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_keys_and_bindings_survive_a_round_trip() {
+        let text = r#"{"theme":"nord","hidden":["host"],"keys":{"kill":["K"]},"from_the_future":{"a":1}}"#;
+        let c: Config = serde_json::from_str(text).unwrap();
+        assert_eq!(c.hidden, [crate::ui::Panel::Host]);
+        assert_eq!(c.keys[&crate::ui::Action::Kill], ["K"]);
+        let back = serde_json::to_value(&c).unwrap();
+        assert_eq!(back["from_the_future"]["a"], 1);
+        assert_eq!(back["keys"]["kill"][0], "K");
+        assert!(serde_json::from_str::<Config>(r#"{"sort":"bogus"}"#).is_err(), "bad values are reported, not silently reset");
     }
 }
