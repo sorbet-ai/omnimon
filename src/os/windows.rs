@@ -17,6 +17,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use libloading::Library;
 
@@ -101,7 +103,25 @@ struct Pdh {
     proc_shared: Handle,
     engine: Handle,
     adapter_shared: Handle,
+    adapter_dedicated: Handle,
     primed: bool,
+}
+
+/// Adapter-wide usage.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdapterUsage {
+    pub dedicated: Option<u64>,
+    pub shared: Option<u64>,
+    /// Busiest engine, percent (Task Manager's adapter "GPU" figure).
+    pub util: Option<f32>,
+    pub enc: Option<f32>,
+    pub dec: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PdhSample {
+    pub procs: HashMap<(Luid, u32), ProcUsage>,
+    pub adapters: HashMap<Luid, AdapterUsage>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -129,12 +149,25 @@ impl Pdh {
             let proc_shared = counter(r"\GPU Process Memory(*)\Shared Usage");
             let engine = counter(r"\GPU Engine(*)\Utilization Percentage");
             let adapter_shared = counter(r"\GPU Adapter Memory(*)\Shared Usage");
+            let adapter_dedicated = counter(r"\GPU Adapter Memory(*)\Dedicated Usage");
             if proc_dedicated.is_null() && engine.is_null() {
                 log::debug!("PDH GPU counters unavailable");
                 close(query);
                 return None;
             }
-            Some(Pdh { collect, get_array, close, query, proc_dedicated, proc_shared, engine, adapter_shared, primed: false, _lib: lib })
+            Some(Pdh {
+                collect,
+                get_array,
+                close,
+                query,
+                proc_dedicated,
+                proc_shared,
+                engine,
+                adapter_shared,
+                adapter_dedicated,
+                primed: false,
+                _lib: lib,
+            })
         }
     }
 
@@ -179,23 +212,52 @@ impl Pdh {
         Vec::new()
     }
 
-    /// Per (luid, pid) usage and per-adapter shared bytes.
-    fn sample(&mut self) -> (HashMap<(Luid, u32), ProcUsage>, HashMap<Luid, u64>) {
+    fn sample(&mut self) -> PdhSample {
         if unsafe { (self.collect)(self.query) } != 0 {
-            return Default::default();
+            return PdhSample::default();
         }
         // Rate counters (engine utilization) need two collections.
         let engine = if self.primed { self.read(self.engine) } else { Vec::new() };
         self.primed = true;
-        let procs = aggregate(&self.read(self.proc_dedicated), &self.read(self.proc_shared), &engine);
-        let mut adapters = HashMap::new();
-        for (name, v) in self.read(self.adapter_shared) {
-            if let Some(luid) = parse_adapter_instance(&name) {
-                *adapters.entry(luid).or_insert(0) += v.max(0.0) as u64;
+        let (procs, mut adapters) = aggregate(&self.read(self.proc_dedicated), &self.read(self.proc_shared), &engine);
+        for (counter, shared) in [(self.adapter_shared, true), (self.adapter_dedicated, false)] {
+            for (name, v) in self.read(counter) {
+                if let Some(luid) = parse_adapter_instance(&name) {
+                    let a = adapters.entry(luid).or_default();
+                    let slot = if shared { &mut a.shared } else { &mut a.dedicated };
+                    *slot = Some(slot.unwrap_or(0) + v.max(0.0) as u64);
+                }
             }
         }
-        (procs, adapters)
+        PdhSample { procs, adapters }
     }
+}
+
+// SAFETY: the query is only touched under the mutex below.
+unsafe impl Send for Pdh {}
+
+/// One counter query per process, shared by the NVIDIA enricher and the
+/// WDDM backend; a sample is reused within a tick so counters are collected once.
+struct PdhCache {
+    pdh: Pdh,
+    last: Option<(Instant, Arc<PdhSample>)>,
+}
+
+fn pdh_cache() -> Option<&'static Mutex<PdhCache>> {
+    static CACHE: OnceLock<Option<Mutex<PdhCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Pdh::new().map(|pdh| Mutex::new(PdhCache { pdh, last: None }))).as_ref()
+}
+
+pub fn pdh_sample() -> Option<Arc<PdhSample>> {
+    let mut c = pdh_cache()?.lock().ok()?;
+    if let Some((t, s)) = &c.last
+        && t.elapsed() < Duration::from_millis(150)
+    {
+        return Some(s.clone());
+    }
+    let s = Arc::new(c.pdh.sample());
+    c.last = Some((Instant::now(), s.clone()));
+    Some(s)
 }
 
 impl Drop for Pdh {
@@ -206,8 +268,11 @@ impl Drop for Pdh {
 
 /// Fold raw counter instances into per-(adapter, pid) usage. Memory sums
 /// over instances (one per physical adapter part); engine utilization sums
-/// per engine, then takes the busiest engine (Task Manager's rule).
-fn aggregate(dedicated: &[(String, f64)], shared: &[(String, f64)], engine: &[(String, f64)]) -> HashMap<(Luid, u32), ProcUsage> {
+/// per engine, then takes the busiest engine (Task Manager's rule). The
+/// adapter figure sums every process per engine, then takes the busiest.
+type Aggregated = (HashMap<(Luid, u32), ProcUsage>, HashMap<Luid, AdapterUsage>);
+
+fn aggregate(dedicated: &[(String, f64)], shared: &[(String, f64)], engine: &[(String, f64)]) -> Aggregated {
     let mut out: HashMap<(Luid, u32), ProcUsage> = HashMap::new();
     for (list, shared_mem) in [(dedicated, false), (shared, true)] {
         for (name, v) in list {
@@ -219,20 +284,21 @@ fn aggregate(dedicated: &[(String, f64)], shared: &[(String, f64)], engine: &[(S
         }
     }
     let mut per_engine: HashMap<(Luid, u32, &str), (f64, &str)> = HashMap::new();
+    let mut adapter_engine: HashMap<(Luid, &str), (f64, &str)> = HashMap::new();
     for (name, v) in engine {
         if let Some((pid, luid, rest)) = parse_instance(name) {
             let (eng, ty) = rest.split_once("_engtype_").unwrap_or((rest, ""));
             per_engine.entry((luid, pid, eng)).or_insert((0.0, ty)).0 += v;
+            adapter_engine.entry((luid, eng)).or_insert((0.0, ty)).0 += v;
         }
     }
-    for ((luid, pid, _), (v, ty)) in per_engine {
-        let e = out.entry((luid, pid)).or_default();
+    fn fold(util: &mut Option<f32>, enc: &mut Option<f32>, dec: &mut Option<f32>, v: f64, ty: &str) {
         let v = v.clamp(0.0, 100.0) as f32;
-        e.util = Some(e.util.unwrap_or(0.0).max(v));
+        *util = Some(util.unwrap_or(0.0).max(v));
         let slot = if ty.starts_with("VideoEncode") {
-            Some(&mut e.enc)
+            Some(enc)
         } else if ty.starts_with("VideoDecode") {
-            Some(&mut e.dec)
+            Some(dec)
         } else {
             None
         };
@@ -240,7 +306,16 @@ fn aggregate(dedicated: &[(String, f64)], shared: &[(String, f64)], engine: &[(S
             *slot = Some(slot.unwrap_or(0.0).max(v));
         }
     }
-    out
+    for ((luid, pid, _), (v, ty)) in per_engine {
+        let e = out.entry((luid, pid)).or_default();
+        fold(&mut e.util, &mut e.enc, &mut e.dec, v, ty);
+    }
+    let mut adapters: HashMap<Luid, AdapterUsage> = HashMap::new();
+    for ((luid, _), (v, ty)) in adapter_engine {
+        let a = adapters.entry(luid).or_default();
+        fold(&mut a.util, &mut a.enc, &mut a.dec, v, ty);
+    }
+    (out, adapters)
 }
 
 /// "pid_1234_luid_0x00000000_0x0000D1A5_phys_0[_eng_3_engtype_3D]"
@@ -261,6 +336,113 @@ fn parse_luid(s: &str) -> Option<(Luid, &str)> {
     let (hi, rest) = rest.split_once("_0x")?;
     let (lo, rest) = rest.split_once('_').unwrap_or((rest, ""));
     Some(((u32::from_str_radix(hi, 16).ok()? as i32, u32::from_str_radix(lo, 16).ok()?), rest))
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AdapterDesc {
+    pub luid: Luid,
+    pub name: String,
+    pub vendor_id: Option<u32>,
+    pub device_id: Option<u32>,
+    pub pci: Option<(u32, u32, u32)>,
+    /// Dedicated VRAM (small carve-out on integrated GPUs).
+    pub dedicated: u64,
+    /// System memory the adapter may use.
+    pub shared_system: u64,
+}
+
+const KMTQAITYPE_GETSEGMENTSIZE: u32 = 3;
+const KMTQAITYPE_ADAPTERREGISTRYINFO: u32 = 8;
+const KMTQAITYPE_PHYSICALADAPTERDEVICEIDS: u32 = 31;
+
+#[repr(C)]
+struct SegmentSizeInfo {
+    dedicated_video: u64,
+    dedicated_system: u64,
+    shared_system: u64,
+}
+
+#[repr(C)]
+struct RegistryInfo {
+    adapter_string: [u16; 260],
+    bios_string: [u16; 260],
+    dac_type: [u16; 260],
+    chip_type: [u16; 260],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct QueryDeviceIds {
+    physical_adapter_index: u32,
+    vendor_id: u32,
+    device_id: u32,
+    sub_vendor_id: u32,
+    sub_system_id: u32,
+    revision_id: u32,
+    bus_type: u32,
+}
+
+fn wstr(w: &[u16]) -> String {
+    let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
+    String::from_utf16_lossy(&w[..end]).trim().to_string()
+}
+
+/// Every WDDM adapter with its name, IDs, PCI location and memory sizes.
+pub fn adapter_descs() -> Vec<AdapterDesc> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(lib) = Library::new("gdi32.dll") else { return out };
+        type Enum = unsafe extern "system" fn(*mut EnumAdapters2) -> i32;
+        type Query = unsafe extern "system" fn(*const QueryAdapterInfo) -> i32;
+        type Close = unsafe extern "system" fn(*const u32) -> i32;
+        let (Ok(en), Ok(q), Ok(cl)) = (
+            lib.get::<Enum>(b"D3DKMTEnumAdapters2\0"),
+            lib.get::<Query>(b"D3DKMTQueryAdapterInfo\0"),
+            lib.get::<Close>(b"D3DKMTCloseAdapter\0"),
+        ) else {
+            return out;
+        };
+        let mut e = EnumAdapters2 { num: 0, adapters: std::ptr::null_mut() };
+        if en(&mut e) != 0 || e.num == 0 {
+            return out;
+        }
+        let mut list = vec![AdapterInfo::default(); e.num as usize];
+        e.adapters = list.as_mut_ptr();
+        if en(&mut e) != 0 {
+            return out;
+        }
+        let query =
+            |h: u32, kind: u32, data: *mut c_void, size: usize| q(&QueryAdapterInfo { h_adapter: h, kind, data, size: size as u32 }) == 0;
+        for a in &list[..(e.num as usize).min(list.len())] {
+            let mut d = AdapterDesc { luid: (a.luid_high, a.luid_low), ..Default::default() };
+            let mut addr = AdapterAddress::default();
+            if query(a.h_adapter, KMTQAITYPE_ADAPTERADDRESS, &mut addr as *mut _ as *mut c_void, std::mem::size_of::<AdapterAddress>()) {
+                d.pci = Some((addr.bus, addr.device, addr.function));
+            }
+            let mut reg: RegistryInfo = std::mem::zeroed();
+            if query(a.h_adapter, KMTQAITYPE_ADAPTERREGISTRYINFO, &mut reg as *mut _ as *mut c_void, std::mem::size_of::<RegistryInfo>()) {
+                d.name = wstr(&reg.adapter_string);
+            }
+            let mut seg = SegmentSizeInfo { dedicated_video: 0, dedicated_system: 0, shared_system: 0 };
+            if query(a.h_adapter, KMTQAITYPE_GETSEGMENTSIZE, &mut seg as *mut _ as *mut c_void, std::mem::size_of::<SegmentSizeInfo>()) {
+                d.dedicated = seg.dedicated_video;
+                d.shared_system = seg.shared_system;
+            }
+            let mut ids = QueryDeviceIds::default();
+            if query(
+                a.h_adapter,
+                KMTQAITYPE_PHYSICALADAPTERDEVICEIDS,
+                &mut ids as *mut _ as *mut c_void,
+                std::mem::size_of::<QueryDeviceIds>(),
+            ) {
+                d.vendor_id = Some(ids.vendor_id);
+                d.device_id = Some(ids.device_id);
+            }
+            cl(&a.h_adapter);
+            out.push(d);
+        }
+    }
+    out
 }
 
 /// Enumerate WDDM adapters: LUID -> PCI location.
@@ -305,7 +487,7 @@ fn adapters() -> HashMap<Luid, (u32, u32, u32)> {
 }
 
 /// Parse a PCI bus id "00000000:01:00.0" -> (bus, device, function).
-fn parse_bus_id(s: &str) -> Option<(u32, u32, u32)> {
+pub fn parse_bus_id(s: &str) -> Option<(u32, u32, u32)> {
     let mut parts = s.rsplitn(3, ':');
     let devfn = parts.next()?;
     let bus = parts.next()?;
@@ -315,7 +497,6 @@ fn parse_bus_id(s: &str) -> Option<(u32, u32, u32)> {
 
 /// Fills per-process data NVML can't provide under WDDM.
 pub struct Enricher {
-    pdh: Pdh,
     /// WDDM adapter of each GPU (by global index).
     luids: Vec<Option<Luid>>,
     totals: Vec<Option<u64>>,
@@ -326,7 +507,7 @@ unsafe impl Send for Enricher {}
 
 impl Enricher {
     pub fn new(gpus: &[GpuInfo]) -> Option<Self> {
-        let pdh = Pdh::new()?;
+        pdh_cache()?;
         let map = adapters();
         let luids: Vec<Option<Luid>> = gpus
             .iter()
@@ -338,24 +519,24 @@ impl Enricher {
         if luids.iter().all(Option::is_none) {
             log::debug!("no GPU matched a WDDM adapter ({} adapters)", map.len());
         }
-        Some(Enricher { pdh, luids, totals: gpus.iter().map(|g| g.memory_total).collect() })
+        Some(Enricher { luids, totals: gpus.iter().map(|g| g.memory_total).collect() })
     }
 
     pub fn enrich(&mut self, samples: &mut [GpuSample], procs: &mut Vec<(usize, GpuProcess)>) {
-        let (usage, adapters) = self.pdh.sample();
+        let Some(sample) = pdh_sample() else { return };
         for (i, s) in samples.iter_mut().enumerate() {
             if let Some(Some(luid)) = self.luids.get(i) {
-                s.mem_shared = s.mem_shared.or(adapters.get(luid).copied());
+                s.mem_shared = s.mem_shared.or(sample.adapters.get(luid).and_then(|a| a.shared));
             }
         }
-        merge(usage, &self.luids, &self.totals, procs);
+        merge(&sample.procs, &self.luids, &self.totals, procs);
     }
 }
 
 /// Fill in what the GPU backend couldn't report and add processes it didn't
 /// list. The counters occasionally report garbage (terabytes): anything
 /// larger than the card is dropped.
-fn merge(usage: HashMap<(Luid, u32), ProcUsage>, luids: &[Option<Luid>], totals: &[Option<u64>], procs: &mut Vec<(usize, GpuProcess)>) {
+fn merge(usage: &HashMap<(Luid, u32), ProcUsage>, luids: &[Option<Luid>], totals: &[Option<u64>], procs: &mut Vec<(usize, GpuProcess)>) {
     let sane = |gpu: usize, v: Option<u64>| v.filter(|&b| totals.get(gpu).copied().flatten().is_none_or(|t| b <= t));
     let mut seen = HashSet::new();
     for (gpu, p) in procs.iter_mut() {
@@ -369,7 +550,7 @@ fn merge(usage: HashMap<(Luid, u32), ProcUsage>, luids: &[Option<Luid>], totals:
             p.dec_util = p.dec_util.or(u.dec);
         }
     }
-    for ((luid, pid), u) in usage {
+    for (&(luid, pid), u) in usage {
         let Some(gpu) = luids.iter().position(|l| *l == Some(luid)) else { continue };
         let busy = u.dedicated.unwrap_or(0) > 0 || u.shared.unwrap_or(0) > (16 << 20) || u.util.unwrap_or(0.0) > 0.0;
         if seen.contains(&(gpu, pid)) || !busy {
@@ -423,7 +604,9 @@ mod tests {
             n("pid_5_luid_0x0_0xA_phys_0_eng_0_engtype_3D", 15.0), // same engine: sums
             n("pid_5_luid_0x0_0xA_phys_0_eng_4_engtype_VideoDecode", 60.0),
         ];
-        let u = &aggregate(&ded, &sh, &eng)[&((0, 0xA), 5)];
+        let (procs, adapters) = aggregate(&ded, &sh, &eng);
+        let u = &procs[&((0, 0xA), 5)];
+        assert_eq!(adapters[&(0, 0xA)].util, Some(60.0));
         assert_eq!(u.dedicated, Some(150));
         assert_eq!(u.shared, Some(7));
         assert_eq!(u.util, Some(60.0)); // busiest engine
@@ -436,7 +619,7 @@ mod tests {
         usage.insert(((0, 1), 10), ProcUsage { dedicated: Some(1 << 40), ..Default::default() });
         usage.insert(((0, 1), 11), ProcUsage { dedicated: Some(1 << 20), shared: Some(1 << 30), ..Default::default() });
         let mut procs = vec![(0, GpuProcess { pid: 10, ..Default::default() })];
-        merge(usage, &[Some((0, 1))], &[Some(24 << 30)], &mut procs);
+        merge(&usage, &[Some((0, 1))], &[Some(24 << 30)], &mut procs);
         assert_eq!(procs[0].1.gpu_mem, None);
         let added = procs.iter().find(|p| p.1.pid == 11).unwrap();
         assert_eq!(added.1.gpu_mem_shared, Some(1 << 30));

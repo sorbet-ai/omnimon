@@ -168,7 +168,10 @@ impl Host {
             })
             .collect();
 
-        let local: Vec<Pid> = joined.iter().filter_map(|j| j.2.map(Pid::from_u32)).collect();
+        // A process using several GPUs appears once per GPU; refresh it once.
+        let mut local: Vec<Pid> = joined.iter().filter_map(|j| j.2.map(Pid::from_u32)).collect();
+        local.sort_unstable();
+        local.dedup();
         if !local.is_empty() {
             let kind = ProcessRefreshKind::nothing()
                 .with_cpu()

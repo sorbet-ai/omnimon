@@ -5,7 +5,7 @@
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod pidmap;
 #[cfg(windows)]
-mod windows;
+pub mod windows;
 
 use crate::model::{GpuInfo, GpuProcess, GpuSample};
 

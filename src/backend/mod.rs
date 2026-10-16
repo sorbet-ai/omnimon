@@ -12,6 +12,8 @@ pub mod demo;
 #[cfg(target_os = "linux")]
 pub mod drm_fdinfo;
 pub mod nvml;
+#[cfg(windows)]
+pub mod wddm;
 
 use crate::model::{BackendInfo, GpuInfo, GpuSample};
 
@@ -30,37 +32,42 @@ pub struct Detected {
 }
 
 pub fn detect(demo: Option<usize>) -> Detected {
-    let mut backends: Vec<Box<dyn Backend>> = Vec::new();
-    let mut warnings = Vec::new();
-
     if let Some(n) = demo {
-        backends.push(Box::new(demo::Demo::new(n)));
-        return Detected { backends, warnings };
+        return Detected { backends: vec![Box::new(demo::Demo::new(n))], warnings: Vec::new() };
     }
+
+    let mut backends: Vec<Box<dyn Backend>> = Vec::new();
+    let mut failures = Vec::new();
+    let mut add = |backends: &mut Vec<Box<dyn Backend>>, name: &str, r: Result<Box<dyn Backend>, String>| match r {
+        Ok(b) => backends.push(b),
+        Err(e) => {
+            log::debug!("{name} backend: {e}");
+            failures.push(format!("{name}: {e}"));
+        }
+    };
 
     #[cfg(target_os = "macos")]
-    {
-        match apple::Apple::new() {
-            Ok(b) => backends.push(Box::new(b)),
-            Err(e) => warnings.push(format!("Apple GPU: {e}")),
-        }
-        return Detected { backends, warnings };
-    }
+    add(&mut backends, "Apple", apple::Apple::new().map(|b| Box::new(b) as Box<dyn Backend>));
 
-    #[allow(unreachable_code)]
-    match nvml::Nvml::new() {
-        Ok(b) => backends.push(Box::new(b)),
-        Err(e) => warnings.push(e),
-    }
+    #[cfg(not(target_os = "macos"))]
+    add(&mut backends, "NVIDIA", nvml::Nvml::new().map(|b| Box::new(b) as Box<dyn Backend>));
 
     #[cfg(target_os = "linux")]
-    if let Ok(b) = amd::Amd::new() {
-        // NVIDIA missing is only worth a warning if nothing else was found.
-        if backends.is_empty() {
-            warnings.clear();
-        }
-        backends.push(Box::new(b));
+    add(&mut backends, "AMD", amd::Amd::new().map(|b| Box::new(b) as Box<dyn Backend>));
+
+    // Everything else on Windows (AMD, Intel, NVIDIA without NVML), skipping
+    // adapters a richer backend already covers.
+    #[cfg(windows)]
+    {
+        let covered: Vec<(u32, u32, u32)> = backends
+            .iter()
+            .flat_map(|b| b.gpus())
+            .filter_map(|g| g.pci_bus_id.as_deref().and_then(crate::os::windows::parse_bus_id))
+            .collect();
+        add(&mut backends, "WDDM", wddm::Wddm::new(&covered).map(|b| Box::new(b) as Box<dyn Backend>));
     }
 
+    // A missing vendor library is only news when nothing else was found.
+    let warnings = if backends.is_empty() { failures } else { Vec::new() };
     Detected { backends, warnings }
 }
