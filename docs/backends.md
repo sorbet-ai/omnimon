@@ -23,15 +23,20 @@ real hardware during development.
   from WDDM performance counters (`src/os/windows.rs`).
 - WSL2: no process lists at all (driver limitation; nvidia-smi shows none).
 
+### GPM (Hopper and newer), implemented, untested on hardware
+- `nvmlGpmQueryDeviceSupport` per device; two buffers from `nvmlGpmSampleAlloc`,
+  one `nvmlGpmSampleGet` per tick, `nvmlGpmMetricsGet` between consecutive
+  ticks: SM active (2), occupancy (3), tensor any/DMMA/HMMA/IMMA (5/6/7/9),
+  DRAM bandwidth % of peak (10), FP64/32/16 pipes (11-13), NVLink total rx/tx
+  MiB/s (60/61). Shown as `Activity`; Ada and older GeForce answer "not
+  supported" (checked on an RTX 4090), so nothing is shown there.
+
 ### Not yet implemented
 - **MIG**: `nvmlDeviceGetMigMode` → `nvmlDeviceGetMaxMigDeviceCount` →
   `nvmlDeviceGetMigDeviceHandleByIndex` (skip `NOT_FOUND` gaps). Per-instance
   memory works; utilization doesn't (use GPM). Process entries carry
   `gpuInstanceId`/`computeInstanceId` (already parsed into
   `GpuProcess::gpu_instance`).
-- **GPM** (Hopper+): `nvmlGpmQueryDeviceSupport`, two `nvmlGpmSampleGet`
-  ≥100 ms apart, `nvmlGpmMetricsGet` for SM occupancy (3), tensor activity (5),
-  DRAM bandwidth (10), FP16/32/64 util (11-13). Gate on the support probe.
 - **Instant power**: `nvmlDeviceGetFieldValues` with `NVML_FI_DEV_POWER_INSTANT`
   (Ampere+ `GetPowerUsage` is a 1 s average). Verify the field id against nvml.h.
 - `nvmlDeviceGetRunningProcessDetailList` (r550+, struct-versioned): avoids

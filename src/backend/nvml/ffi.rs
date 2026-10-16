@@ -114,6 +114,57 @@ pub struct nvmlFieldValue_t {
     pub value: u64,
 }
 
+/// GPM (GPU Performance Monitoring, Hopper+): opaque sample buffers
+/// compared pairwise.
+pub type nvmlGpmSample_t = *mut c_void;
+pub const NVML_GPM_METRICS_GET_VERSION: c_uint = 1;
+pub const NVML_GPM_SUPPORT_VERSION: c_uint = 1;
+
+pub const NVML_GPM_METRIC_SM_UTIL: c_uint = 2;
+pub const NVML_GPM_METRIC_SM_OCCUPANCY: c_uint = 3;
+pub const NVML_GPM_METRIC_ANY_TENSOR_UTIL: c_uint = 5;
+pub const NVML_GPM_METRIC_DFMA_TENSOR_UTIL: c_uint = 6;
+pub const NVML_GPM_METRIC_HMMA_TENSOR_UTIL: c_uint = 7;
+pub const NVML_GPM_METRIC_IMMA_TENSOR_UTIL: c_uint = 9;
+pub const NVML_GPM_METRIC_DRAM_BW_UTIL: c_uint = 10;
+pub const NVML_GPM_METRIC_FP64_UTIL: c_uint = 11;
+pub const NVML_GPM_METRIC_FP32_UTIL: c_uint = 12;
+pub const NVML_GPM_METRIC_FP16_UTIL: c_uint = 13;
+/// MiB/s.
+pub const NVML_GPM_METRIC_NVLINK_TOTAL_RX_PER_SEC: c_uint = 60;
+pub const NVML_GPM_METRIC_NVLINK_TOTAL_TX_PER_SEC: c_uint = 61;
+
+#[repr(C)]
+pub struct nvmlGpmSupport_t {
+    pub version: c_uint,
+    pub is_supported_device: c_uint,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct nvmlGpmMetric_t {
+    pub metric_id: c_uint,
+    pub nvml_return: nvmlReturn_t,
+    pub value: f64,
+    pub short_name: *const c_char,
+    pub long_name: *const c_char,
+    pub unit: *const c_char,
+}
+
+/// The C struct ends in `metrics[NVML_GPM_METRIC_MAX]` (98, later 210);
+/// NVML only touches the first `num_metrics`, and we leave room for the
+/// largest anyway.
+pub const GPM_METRICS_CAP: usize = 256;
+
+#[repr(C)]
+pub struct nvmlGpmMetricsGet_t {
+    pub version: c_uint,
+    pub num_metrics: c_uint,
+    pub sample1: nvmlGpmSample_t,
+    pub sample2: nvmlGpmSample_t,
+    pub metrics: [nvmlGpmMetric_t; GPM_METRICS_CAP],
+}
+
 type F<A> = Option<A>;
 type DevU = unsafe extern "C" fn(nvmlDevice_t, *mut c_uint) -> nvmlReturn_t;
 type DevUU = unsafe extern "C" fn(nvmlDevice_t, c_uint, *mut c_uint) -> nvmlReturn_t;
@@ -220,6 +271,12 @@ nvml_api! {
     conf_compute_mem_size_info: unsafe extern "C" fn() -> nvmlReturn_t = "nvmlDeviceGetConfComputeMemSizeInfo";
     running_process_detail_list: unsafe extern "C" fn() -> nvmlReturn_t = "nvmlDeviceGetRunningProcessDetailList";
     process_utilization: unsafe extern "C" fn(nvmlDevice_t, *mut nvmlProcessUtilizationSample_t, *mut c_uint, c_ulonglong) -> nvmlReturn_t = "nvmlDeviceGetProcessUtilization";
+
+    gpm_query_support: unsafe extern "C" fn(nvmlDevice_t, *mut nvmlGpmSupport_t) -> nvmlReturn_t = "nvmlGpmQueryDeviceSupport";
+    gpm_sample_alloc: unsafe extern "C" fn(*mut nvmlGpmSample_t) -> nvmlReturn_t = "nvmlGpmSampleAlloc";
+    gpm_sample_free: unsafe extern "C" fn(nvmlGpmSample_t) -> nvmlReturn_t = "nvmlGpmSampleFree";
+    gpm_sample_get: unsafe extern "C" fn(nvmlDevice_t, nvmlGpmSample_t) -> nvmlReturn_t = "nvmlGpmSampleGet";
+    gpm_metrics_get: unsafe extern "C" fn(*mut nvmlGpmMetricsGet_t) -> nvmlReturn_t = "nvmlGpmMetricsGet";
 }
 
 /// Places NVML is commonly found. Order matters: versioned soname first

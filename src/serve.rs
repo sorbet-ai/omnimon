@@ -93,6 +93,23 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
     );
     metric("gpu_utilization_percent", "GPU core utilization.", "gauge", per(&|g| g.util_gpu.map(f64::from)));
     metric("gpu_memory_bandwidth_utilization_percent", "Memory controller utilization.", "gauge", per(&|g| g.util_mem.map(f64::from)));
+    let act = |f: fn(&crate::model::Activity) -> Option<f32>| per(&|g| g.activity.as_ref().and_then(f).map(f64::from));
+    metric("gpu_sm_active_percent", "Share of time SMs had work (GPM).", "gauge", act(|a| a.sm_active));
+    metric("gpu_sm_occupancy_percent", "Resident warps vs maximum (GPM).", "gauge", act(|a| a.sm_occupancy));
+    metric("gpu_tensor_active_percent", "Tensor core activity, any precision (GPM).", "gauge", act(|a| a.tensor));
+    metric("gpu_dram_bandwidth_percent", "DRAM bandwidth as a share of peak (GPM).", "gauge", act(|a| a.dram_bw));
+    metric(
+        "gpu_nvlink_rx_bytes_per_second",
+        "NVLink receive rate, all links (GPM).",
+        "gauge",
+        per(&|g| g.activity.as_ref()?.nvlink_rx.map(|v| v as f64)),
+    );
+    metric(
+        "gpu_nvlink_tx_bytes_per_second",
+        "NVLink transmit rate, all links (GPM).",
+        "gauge",
+        per(&|g| g.activity.as_ref()?.nvlink_tx.map(|v| v as f64)),
+    );
     metric("gpu_memory_used_bytes", "Device memory in use.", "gauge", per(&|g| g.mem_used.map(|v| v as f64)));
     metric("gpu_memory_total_bytes", "Device memory size.", "gauge", per(&|g| g.mem_total.map(|v| v as f64)));
     metric("gpu_memory_shared_bytes", "GPU allocations in system memory.", "gauge", per(&|g| g.mem_shared.map(|v| v as f64)));

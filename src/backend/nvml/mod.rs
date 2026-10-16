@@ -8,7 +8,7 @@ use std::ffi::{c_char, c_int, c_uint, c_ulonglong, c_void};
 use ffi::*;
 
 use super::{Backend, Tune};
-use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
+use crate::model::{Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
 
 /// Call an optional NVML function pointer; `Err(code)` on failure.
 macro_rules! call {
@@ -69,6 +69,105 @@ struct Dev {
     h: Handle,
     info: GpuInfo,
     unsupported: u64,
+    /// Hopper+ performance monitoring, when the device supports it.
+    gpm: Option<Gpm>,
+}
+
+/// Two GPM sample buffers: metrics come from the previous tick's sample and
+/// this tick's, so every sampling interval is measured.
+struct Gpm {
+    prev: nvmlGpmSample_t,
+    cur: nvmlGpmSample_t,
+    primed: bool,
+}
+
+// SAFETY: sample buffers are only touched by the thread sampling their device.
+unsafe impl Send for Gpm {}
+
+const GPM_METRICS: [c_uint; 12] = [
+    NVML_GPM_METRIC_SM_UTIL,
+    NVML_GPM_METRIC_SM_OCCUPANCY,
+    NVML_GPM_METRIC_ANY_TENSOR_UTIL,
+    NVML_GPM_METRIC_HMMA_TENSOR_UTIL,
+    NVML_GPM_METRIC_IMMA_TENSOR_UTIL,
+    NVML_GPM_METRIC_DFMA_TENSOR_UTIL,
+    NVML_GPM_METRIC_FP16_UTIL,
+    NVML_GPM_METRIC_FP32_UTIL,
+    NVML_GPM_METRIC_FP64_UTIL,
+    NVML_GPM_METRIC_DRAM_BW_UTIL,
+    NVML_GPM_METRIC_NVLINK_TOTAL_RX_PER_SEC,
+    NVML_GPM_METRIC_NVLINK_TOTAL_TX_PER_SEC,
+];
+
+impl Gpm {
+    fn new(api: &Api, h: nvmlDevice_t) -> Option<Gpm> {
+        let mut sup = nvmlGpmSupport_t { version: NVML_GPM_SUPPORT_VERSION, is_supported_device: 0 };
+        call!(api.gpm_query_support, h, &mut sup).ok().filter(|_| sup.is_supported_device != 0)?;
+        let (mut a, mut b): (nvmlGpmSample_t, nvmlGpmSample_t) = (std::ptr::null_mut(), std::ptr::null_mut());
+        call!(api.gpm_sample_alloc, &mut a).ok()?;
+        if call!(api.gpm_sample_alloc, &mut b).is_err() {
+            let _ = call!(api.gpm_sample_free, a);
+            return None;
+        }
+        Some(Gpm { prev: a, cur: b, primed: false })
+    }
+
+    fn free(&self, api: &Api) {
+        let _ = call!(api.gpm_sample_free, self.prev);
+        let _ = call!(api.gpm_sample_free, self.cur);
+    }
+
+    /// Activity since the previous call (None on the first).
+    fn sample(&mut self, api: &Api, h: nvmlDevice_t) -> Option<Activity> {
+        if call!(api.gpm_sample_get, h, self.cur).is_err() {
+            self.primed = false;
+            return None;
+        }
+        let out = if self.primed { self.metrics(api) } else { None };
+        std::mem::swap(&mut self.prev, &mut self.cur);
+        self.primed = true;
+        out
+    }
+
+    fn metrics(&self, api: &Api) -> Option<Activity> {
+        // ~10 KB; boxed to keep it off the sampler thread's stack.
+        let mut req: Box<nvmlGpmMetricsGet_t> = Box::new(unsafe { std::mem::zeroed() });
+        req.version = NVML_GPM_METRICS_GET_VERSION;
+        req.num_metrics = GPM_METRICS.len() as c_uint;
+        req.sample1 = self.prev;
+        req.sample2 = self.cur;
+        for (m, id) in req.metrics.iter_mut().zip(GPM_METRICS) {
+            m.metric_id = id;
+        }
+        call!(api.gpm_metrics_get, &mut *req).ok()?;
+        let got: Vec<(c_uint, f64)> = req.metrics[..GPM_METRICS.len()]
+            .iter()
+            .filter(|m| m.nvml_return == NVML_SUCCESS && m.value.is_finite() && m.value >= 0.0)
+            .map(|m| (m.metric_id, m.value))
+            .collect();
+        Some(activity_from(&got))
+    }
+}
+
+/// Map GPM metric values onto [`Activity`]. Pure, so it is tested.
+fn activity_from(values: &[(c_uint, f64)]) -> Activity {
+    let get = |id| values.iter().find(|(m, _)| *m == id).map(|(_, v)| *v);
+    let pct = |id| get(id).map(|v| v.min(100.0) as f32);
+    let mib_s = |id| get(id).map(|v| (v * 1024.0 * 1024.0) as u64);
+    Activity {
+        sm_active: pct(NVML_GPM_METRIC_SM_UTIL),
+        sm_occupancy: pct(NVML_GPM_METRIC_SM_OCCUPANCY),
+        tensor: pct(NVML_GPM_METRIC_ANY_TENSOR_UTIL),
+        tensor_half: pct(NVML_GPM_METRIC_HMMA_TENSOR_UTIL),
+        tensor_int: pct(NVML_GPM_METRIC_IMMA_TENSOR_UTIL),
+        tensor_double: pct(NVML_GPM_METRIC_DFMA_TENSOR_UTIL),
+        fp16: pct(NVML_GPM_METRIC_FP16_UTIL),
+        fp32: pct(NVML_GPM_METRIC_FP32_UTIL),
+        fp64: pct(NVML_GPM_METRIC_FP64_UTIL),
+        dram_bw: pct(NVML_GPM_METRIC_DRAM_BW_UTIL),
+        nvlink_rx: mib_s(NVML_GPM_METRIC_NVLINK_TOTAL_RX_PER_SEC),
+        nvlink_tx: mib_s(NVML_GPM_METRIC_NVLINK_TOTAL_TX_PER_SEC),
+    }
 }
 
 impl Dev {
@@ -135,7 +234,9 @@ impl Nvml {
                 continue;
             }
             let info = static_info(&api, h);
-            devs.push(Dev { h: Handle(h), info, unsupported: 0 });
+            let gpm = Gpm::new(&api, h);
+            log::debug!("NVML device {i}: GPM {}", if gpm.is_some() { "supported" } else { "not supported" });
+            devs.push(Dev { h: Handle(h), info, unsupported: 0, gpm });
         }
 
         let info = BackendInfo {
@@ -152,6 +253,9 @@ impl Nvml {
 
 impl Drop for Nvml {
     fn drop(&mut self) {
+        for g in self.devs.iter().filter_map(|d| d.gpm.as_ref()) {
+            g.free(&self.api);
+        }
         let _ = call!(self.api.shutdown);
     }
 }
@@ -447,6 +551,10 @@ fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
     s.ecc_corrected = d.q(M::EccCorr, || ecc(NVML_MEMORY_ERROR_TYPE_CORRECTED));
     s.ecc_uncorrected = d.q(M::EccUncorr, || ecc(NVML_MEMORY_ERROR_TYPE_UNCORRECTED));
 
+    if let Some(g) = &mut d.gpm {
+        s.activity = g.sample(api, h);
+    }
+
     s.processes = processes(api, d, v3_stride);
     s
 }
@@ -673,6 +781,19 @@ mod tests {
         // 32-byte entries read at 24 hit the zero padding: pid 0.
         let b = entries(32, &[(1234, 1 << 30), (5678, 2 << 30)]);
         assert!(parse_proc_infos(&b, 2, 24).is_none());
+    }
+
+    #[test]
+    fn gpm_values_map_to_activity() {
+        let a = activity_from(&[
+            (NVML_GPM_METRIC_ANY_TENSOR_UTIL, 61.5),
+            (NVML_GPM_METRIC_DRAM_BW_UTIL, 140.0),
+            (NVML_GPM_METRIC_NVLINK_TOTAL_RX_PER_SEC, 2.0),
+        ]);
+        assert_eq!(a.tensor, Some(61.5));
+        assert_eq!(a.dram_bw, Some(100.0), "clamped");
+        assert_eq!(a.nvlink_rx, Some(2 << 20));
+        assert_eq!(a.fp32, None);
     }
 
     #[test]

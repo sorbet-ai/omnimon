@@ -53,7 +53,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         area
     };
 
-    let charts = [
+    let mut charts = vec![
         Chart { title: "GPU utilization", value: fmt::pct(sm.util_gpu), data: &h.util, grad: t.util, mirror: None },
         Chart {
             title: "Memory",
@@ -99,14 +99,28 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             mirror: Some((&h.tx, t.power)),
         },
     ];
+    if let Some(a) = &sm.activity {
+        charts.push(Chart { title: "Tensor cores", value: fmt::pct(a.tensor), data: &h.tensor, grad: t.util, mirror: None });
+        charts.push(Chart {
+            title: "Memory bandwidth",
+            value: match (a.dram_bw, g.memory_bandwidth) {
+                (Some(u), Some(peak)) => fmt::bandwidth(peak * u as f64 / 100.0),
+                (u, _) => fmt::pct(u),
+            },
+            data: &h.dram,
+            grad: t.mem,
+            mirror: None,
+        });
+    }
 
-    let (cols, rows) = if area.width >= 150 {
-        (3, 2)
+    let cols = if area.width >= 150 {
+        3
     } else if area.width >= 90 {
-        (2, 3)
+        2
     } else {
-        (1, 6)
+        1
     };
+    let rows = charts.len().div_ceil(cols);
     let row_areas = Layout::vertical(vec![Constraint::Fill(1); rows]).split(area);
     let ctx = app.chart_ctx();
     for (k, c) in charts.iter().enumerate() {

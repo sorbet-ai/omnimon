@@ -64,6 +64,9 @@ pub struct GpuHist {
     pub clock: Ring,
     pub rx: Ring,
     pub tx: Ring,
+    /// Tensor-core activity and DRAM bandwidth share (where reported).
+    pub tensor: Ring,
+    pub dram: Ring,
     /// Highest power seen; the bar scale for GPUs without a power limit (Apple).
     pub peak_power: f64,
     /// Joules since this session started (integrated power).
@@ -108,7 +111,9 @@ impl History {
         {
             let gap = last + d / 2.0;
             for h in &mut self.gpus {
-                for r in [&mut h.util, &mut h.mem, &mut h.power, &mut h.temp, &mut h.clock, &mut h.rx, &mut h.tx] {
+                for r in
+                    [&mut h.util, &mut h.mem, &mut h.power, &mut h.temp, &mut h.clock, &mut h.rx, &mut h.tx, &mut h.tensor, &mut h.dram]
+                {
                     r.push(gap, None);
                 }
             }
@@ -139,6 +144,9 @@ impl History {
             );
             h.rx.push(t, g.pcie_rx.map(|v| v as f64));
             h.tx.push(t, g.pcie_tx.map(|v| v as f64));
+            let act = g.activity.as_ref();
+            h.tensor.push(t, act.and_then(|a| a.tensor).map(|v| v as f64 / 100.0));
+            h.dram.push(t, act.and_then(|a| a.dram_bw).map(|v| v as f64 / 100.0));
         }
         self.cpu.push(t, Some(s.host.cpu as f64 / 100.0));
         self.net_rx.push(t, s.host.net_rx.map(|v| v as f64));

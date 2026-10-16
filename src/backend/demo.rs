@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use super::Backend;
-use crate::model::{BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
+use crate::model::{Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, PidScope, ProcKind, Throttle, Vendor};
 
 const GIB: u64 = 1 << 30;
 
@@ -184,6 +184,25 @@ impl Backend for Demo {
                 ecc_uncorrected: Some(0),
                 bar1_used: Some(GIB / 8),
                 bar1_total: Some(total),
+                // Only Hopper and newer report unit activity (NVIDIA GPM).
+                activity: (g.architecture.as_deref() == Some("Hopper")).then(|| {
+                    let pct = |x: f64| Some((x * 100.0).clamp(0.0, 100.0).round() as f32);
+                    let tensor = l * 0.8 * if spilling { 0.3 } else { 1.0 };
+                    Activity {
+                        sm_active: pct(l * 0.95),
+                        sm_occupancy: pct(l * 0.45),
+                        tensor: pct(tensor),
+                        tensor_half: pct(tensor * 0.97),
+                        tensor_int: Some(0.0),
+                        tensor_double: Some(0.0),
+                        fp16: pct(l * 0.06),
+                        fp32: pct(l * 0.12),
+                        fp64: Some(0.0),
+                        dram_bw: pct(l * 0.6 + if spilling { 0.2 } else { 0.0 }),
+                        nvlink_rx: Some((l * 120e9 * self.rand()) as u64),
+                        nvlink_tx: Some((l * 110e9 * self.rand()) as u64),
+                    }
+                }),
                 processes: procs,
                 ..Default::default()
             });

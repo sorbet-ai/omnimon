@@ -179,10 +179,19 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
             },
         ),
     ];
-    let optional: [(&str, Option<f64>, Gradient, String); 7] = [
+    let act = sm.activity.as_ref();
+    // Measured DRAM bandwidth (GPM) beats the memory controller's busy time.
+    let (mbw, mbw_text) = match (act.and_then(|a| a.dram_bw), g.memory_bandwidth) {
+        (Some(p), Some(peak)) => (Some(p), fmt::bandwidth(peak * p as f64 / 100.0).replace(' ', "")),
+        (Some(p), None) => (Some(p), fmt::pct(Some(p))),
+        _ => (sm.util_mem, fmt::pct(sm.util_mem)),
+    };
+    let tensor = act.and_then(|a| a.tensor);
+    let optional: [(&str, Option<f64>, Gradient, String); 8] = [
         ("TMP", ratio(sm.temp, Some(g.temp_shutdown.unwrap_or(100))), t.temp, fmt::opt(sm.temp, "°C")),
         ("CLK", ratio(clk, g.max_clock_sm.or(g.max_clock_graphics)), t.util, fmt::opt(clk, "MHz")),
-        ("MBW", sm.util_mem.map(|v| v as f64 / 100.0), t.mem, fmt::pct(sm.util_mem)),
+        ("MBW", mbw.map(|v| v as f64 / 100.0), t.mem, mbw_text),
+        ("TNS", tensor.map(|v| v as f64 / 100.0), t.util, fmt::pct(tensor)),
         ("FAN", sm.fan().map(|v| v as f64 / 100.0), t.temp, fmt::opt(sm.fan(), "%")),
         ("ENC", sm.enc_util.map(|v| v as f64 / 100.0), t.power, fmt::pct(sm.enc_util)),
         ("DEC", sm.dec_util.map(|v| v as f64 / 100.0), t.power, fmt::pct(sm.dec_util)),
@@ -212,6 +221,12 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
             info.push(s("  ▼", t.accent));
             info.push(s(fmt::rate(rx), t.fg));
             info.push(s(" ▲", t.accent2));
+            info.push(s(fmt::rate(tx), t.fg));
+        }
+        if let Some((rx, tx)) = act.and_then(|a| Some((a.nvlink_rx?, a.nvlink_tx?))).filter(|(r, x)| r + x > 0) {
+            info.push(s("  NVL ▼", t.dim));
+            info.push(s(fmt::rate(rx), t.fg));
+            info.push(s(" ▲", t.dim));
             info.push(s(fmt::rate(tx), t.fg));
         }
         f.render_widget(Paragraph::new(Line::from(info)), Rect { y: left.y + nbars as u16, height: 1, ..left });

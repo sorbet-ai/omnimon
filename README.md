@@ -35,7 +35,10 @@ workload is spilling out of VRAM.
   enc/dec, CPU, RAM, runtime, user, command. Sort, filter, tag and signal.
   `Enter` opens the process: parent chain, children, exe, cwd, GPU-relevant
   environment (`CUDA_VISIBLE_DEVICES`, `HIP_*`, `NCCL_*`...), and its history.
-- **Charts**: utilization, memory, power, temperature, SM clock, PCIe rx/tx.
+- **Charts**: utilization, memory, power, temperature, SM clock, PCIe rx/tx;
+  on Hopper and newer also tensor-core activity and real memory bandwidth.
+- **Unit activity** (NVIDIA Hopper+, via GPM): SM active/occupancy, tensor
+  cores by precision, FP pipes, DRAM bandwidth in TB/s, NVLink traffic.
   Real anti-aliased pixel plots in terminals that support images (kitty,
   WezTerm, Ghostty, iTerm2, Windows Terminal, VS Code with
   `terminal.integrated.enableImages`), solid block charts everywhere else.

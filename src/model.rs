@@ -255,6 +255,33 @@ pub struct Spill {
     pub reason: String,
 }
 
+/// What the GPU's execution units and memory are doing, beyond the coarse
+/// "utilization" (which only says *something* ran). Percentages are of time
+/// or of peak; NVIDIA reports these on Hopper and newer (GPM).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Activity {
+    /// Share of time SMs had at least one warp resident, %.
+    pub sm_active: Option<f32>,
+    /// Resident warps as a share of the maximum, %.
+    pub sm_occupancy: Option<f32>,
+    /// Tensor core pipes busy (any precision), %.
+    pub tensor: Option<f32>,
+    /// Tensor cores by precision: FP16/BF16/TF32 (HMMA), INT8 (IMMA), FP64 (DMMA), %.
+    pub tensor_half: Option<f32>,
+    pub tensor_int: Option<f32>,
+    pub tensor_double: Option<f32>,
+    /// Non-tensor floating-point pipes, %.
+    pub fp16: Option<f32>,
+    pub fp32: Option<f32>,
+    pub fp64: Option<f32>,
+    /// DRAM bandwidth as a share of peak, %.
+    pub dram_bw: Option<f32>,
+    /// NVLink traffic, all links, bytes/s.
+    pub nvlink_rx: Option<u64>,
+    pub nvlink_tx: Option<u64>,
+}
+
 /// One sampling of a GPU's dynamic state.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -293,6 +320,9 @@ pub struct GpuSample {
     pub ecc_uncorrected: Option<u64>,
     pub bar1_used: Option<u64>,
     pub bar1_total: Option<u64>,
+    /// Execution-unit and memory activity, where the hardware reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
     pub spill: Spill,
     /// Backend -> collector only; the joined list is `Snapshot::processes`.
     #[serde(skip)]

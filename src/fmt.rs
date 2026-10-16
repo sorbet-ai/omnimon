@@ -37,6 +37,15 @@ pub fn bytes_short(b: u64) -> String {
     }
 }
 
+/// Decimal bytes per second ("1.21 TB/s"), the way bandwidth is specified.
+pub fn bandwidth(bps: f64) -> String {
+    match bps {
+        b if b >= 1e12 => format!("{:.2} TB/s", b / 1e12),
+        b if b >= 1e9 => format!("{:.0} GB/s", b / 1e9),
+        b => format!("{:.0} MB/s", b / 1e6),
+    }
+}
+
 pub fn rate(bps: u64) -> String {
     format!("{}/s", bytes_short(bps))
 }

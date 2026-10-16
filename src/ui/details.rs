@@ -85,8 +85,8 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
             ),
         ),
     ];
-    let live: Vec<(&str, String)> = vec![
-        ("Utilization", format!("gpu {} · memory bw {}", fmt::pct(sm.util_gpu), fmt::pct(sm.util_mem))),
+    let mut live: Vec<(&str, String)> = vec![
+        ("Utilization", format!("gpu {} · memory controller {}", fmt::pct(sm.util_gpu), fmt::pct(sm.util_mem))),
         (
             "Memory",
             match (sm.mem_used, sm.mem_total) {
@@ -174,6 +174,10 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
         ("Status", sm.error.clone().unwrap_or_else(|| "ok".into())),
     ];
 
+    if let Some(a) = &sm.activity {
+        live.splice(1..1, activity_rows(a, g.memory_bandwidth));
+    }
+
     let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(area);
     let kv = |items: Vec<(&str, String)>| -> Vec<Line<'static>> {
         items
@@ -215,4 +219,28 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
         dr,
     );
     f.render_widget(Paragraph::new(kv(live)).wrap(Wrap { trim: false }).block(block(t, false).title_top(title("Live"))), lr);
+}
+
+/// What the execution units and memory are doing (NVIDIA GPM, Hopper+).
+fn activity_rows(a: &crate::model::Activity, peak_bw: Option<f64>) -> Vec<(&'static str, String)> {
+    let p = fmt::pct;
+    let mut rows = vec![
+        ("SM activity", format!("active {} · occupancy {}", p(a.sm_active), p(a.sm_occupancy))),
+        (
+            "Tensor cores",
+            format!("{} · fp16/bf16 {} · int8 {} · fp64 {}", p(a.tensor), p(a.tensor_half), p(a.tensor_int), p(a.tensor_double)),
+        ),
+        ("FP pipes", format!("fp32 {} · fp16 {} · fp64 {}", p(a.fp32), p(a.fp16), p(a.fp64))),
+        (
+            "Memory bandwidth",
+            match (a.dram_bw, peak_bw) {
+                (Some(u), Some(peak)) => format!("{} of {} ({u:.0}%)", fmt::bandwidth(peak * u as f64 / 100.0), fmt::bandwidth(peak)),
+                (u, _) => p(u),
+            },
+        ),
+    ];
+    if let (Some(rx), Some(tx)) = (a.nvlink_rx, a.nvlink_tx) {
+        rows.push(("NVLink", format!("rx {} · tx {}", fmt::rate(rx), fmt::rate(tx))));
+    }
+    rows
 }
