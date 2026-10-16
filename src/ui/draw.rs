@@ -145,18 +145,18 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             left.push(s(v.as_str(), t.fg));
         }
     }
-    if app.rewind > 0 {
-        if let Some(snap) = &app.snap {
-            let ago = app.past.back().map(|n| (n.timestamp - snap.timestamp).max(0.0) as u64).unwrap_or(0);
-            let when = chrono::DateTime::from_timestamp(snap.timestamp as i64, 0)
-                .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
-                .unwrap_or_default();
-            left.push(Span::raw("  "));
-            left.push(Span::styled(
-                format!(" ◀ REWIND -{} · {when} ", crate::fmt::duration(ago)),
-                Style::new().fg(Color::Black).bg(t.accent2).bold(),
-            ));
-        }
+    if app.rewind > 0
+        && let Some(snap) = &app.snap
+    {
+        let ago = app.past.back().map(|n| (n.timestamp - snap.timestamp).max(0.0) as u64).unwrap_or(0);
+        let when = chrono::DateTime::from_timestamp(snap.timestamp as i64, 0)
+            .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+            .unwrap_or_default();
+        left.push(Span::raw("  "));
+        left.push(Span::styled(
+            format!(" ◀ REWIND -{} · {when} ", crate::fmt::duration(ago)),
+            Style::new().fg(Color::Black).bg(t.accent2).bold(),
+        ));
     }
     let lw: usize = left.iter().map(|s| s.width()).sum();
 
