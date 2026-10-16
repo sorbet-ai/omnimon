@@ -1,12 +1,12 @@
 [package]
 # The app name lives HERE and only here. Binary name, window title, env-var
-# prefix (NVTUI_*), config dir, etc. are all derived from CARGO_PKG_NAME.
+# prefix (OMNIMON_*), config dir, etc. are all derived from CARGO_PKG_NAME.
 # To rename the app: change `name` below (and the README). That's it.
-name = "nvtui"
+name = "omnimon"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "A fast, good-looking terminal GPU monitor. Single binary, works in containers, WSL and Windows."
+description = "One terminal monitor for every GPU (NVIDIA, Apple, AMD, Intel), the processes using them and the machine around them. Single binary; works in containers, WSL and Windows."
 license = "MIT"
 
 [dependencies]

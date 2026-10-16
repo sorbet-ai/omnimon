@@ -6,7 +6,7 @@ real hardware during development.
 
 ## NVIDIA (NVML), verified on RTX 4090: Windows 11, WSL2, Docker Desktop
 
-- Library search: `$NVTUI_NVML_PATH`, `libnvidia-ml.so.1`, `libnvidia-ml.so`,
+- Library search: `$OMNIMON_NVML_PATH`, `libnvidia-ml.so.1`, `libnvidia-ml.so`,
   `/usr/lib/wsl/lib`, distro lib dirs, `/usr/local/nvidia/lib64`
   (device plugin), `/home/kubernetes/bin/nvidia/lib64` (GKE),
   `/run/nvidia/driver/...` (GPU operator), versioned `libnvidia-ml.so.<ver>`;

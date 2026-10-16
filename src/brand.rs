@@ -1,12 +1,12 @@
 //! Everything that spells out the app's name goes through here, so renaming
 //! the app is a one-line change to `name` in Cargo.toml.
 
-/// Binary / package name, e.g. `nvtui`.
+/// Binary / package name, e.g. `omnimon`.
 pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Name of an environment variable namespaced to this app: `env_var("NVML_PATH")`
-/// gives `NVTUI_NVML_PATH`.
+/// gives `OMNIMON_NVML_PATH`.
 pub fn env_var(suffix: &str) -> String {
     format!("{}_{}", APP_NAME.to_uppercase().replace('-', "_"), suffix)
 }

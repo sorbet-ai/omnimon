@@ -1,4 +1,4 @@
-# nvtui
+# omnimon
 
 A fast, good-looking terminal monitor for GPUs, the processes using them and
 the machine around them. One self-contained binary for Linux, Windows and
@@ -10,7 +10,7 @@ workload is spilling out of VRAM.
 
 ## Why another one
 
-| | nvtop | nvitop | **nvtui** |
+| | nvtop | nvitop | **omnimon** |
 |---|---|---|---|
 | Single binary, no runtime deps | ✗ (ncurses, libdrm) | ✗ (Python) | ✓ |
 | Finds NVML outside the loader path (WSL, k8s operator, GKE) | ✗ | ✗ | ✓ |
@@ -56,9 +56,9 @@ workload is spilling out of VRAM.
   `--connect box` from your laptop for the full UI (read-only; no auth, so
   keep it on a trusted network).
 - **Alerts**: `alert_command` in the config runs on critical events (spill,
-  thermal, errors) with the event in `NVTUI_EVENT` / `NVTUI_KIND` /
-  `NVTUI_SEVERITY` / `NVTUI_GPU` / `NVTUI_PID`, e.g. `notify-send` or `curl`
-  to a webhook. It runs under `sh -c` (Windows: `cmd /C`, so `%NVTUI_EVENT%`).
+  thermal, errors) with the event in `OMNIMON_EVENT` / `OMNIMON_KIND` /
+  `OMNIMON_SEVERITY` / `OMNIMON_GPU` / `OMNIMON_PID`, e.g. `notify-send` or `curl`
+  to a webhook. It runs under `sh -c` (Windows: `cmd /C`, so `%OMNIMON_EVENT%`).
 - **Containers and energy**: container/pod id per process (from cgroups);
   session energy per GPU and each process's estimated share
   (`price_per_kwh` in the config adds cost).
@@ -78,7 +78,7 @@ bandwidth. Nothing crashes; it just gets several times slower. (Windows'
 NVIDIA "sysmem fallback" does this silently; so does a model partly offloaded
 to the CPU.)
 
-nvtui reports **measured** spill only:
+omnimon reports **measured** spill only:
 
 - per process: GPU allocations living in system memory (Windows WDDM "Shared
   Usage", AMD GTT), shown in `SYS-MEM` with a `!` and in the process popup;
@@ -102,7 +102,7 @@ count as spill while VRAM is under pressure.
 | AMD on Linux | amdgpu sysfs/hwmon + DRM fdinfo | experimental (fake-sysfs tests) |
 | Intel on Linux | i915/xe sysfs/hwmon + DRM fdinfo | experimental (fake-sysfs tests) |
 
-**Containers**: NVML reports *host* PIDs. nvtui checks that a process actually
+**Containers**: NVML reports *host* PIDs. omnimon checks that a process actually
 holds a GPU device before trusting its PID, translates host PIDs where the
 kernel leaks them, matches the rest to local GPU processes, and shows what it
 can't map as `h<pid>` instead of dropping or mislabeling it, so you can't
@@ -129,14 +129,14 @@ In Docker: `docker run --gpus all ...` (NVML is mounted when
 ## Usage
 
 ```
-nvtui                     interactive
-nvtui --once              one-shot summary with diagnosis
-nvtui --json [--watch]    snapshot / JSON lines (schema in report.rs)
-nvtui --serve [ADDR]      Prometheus exporter (default 127.0.0.1:9465)
-nvtui --connect HOST      watch another machine running --serve (read-only)
-nvtui --diagnose          what was detected, and why things are missing
-nvtui --demo 8            8 simulated GPUs
-nvtui --graphics sixel    force a graphics protocol (auto|kitty|sixel|iterm2|off)
+omnimon                     interactive
+omnimon --once              one-shot summary with diagnosis
+omnimon --json [--watch]    snapshot / JSON lines (schema in report.rs)
+omnimon --serve [ADDR]      Prometheus exporter (default 127.0.0.1:9465)
+omnimon --connect HOST      watch another machine running --serve (read-only)
+omnimon --diagnose          what was detected, and why things are missing
+omnimon --demo 8            8 simulated GPUs
+omnimon --graphics sixel    force a graphics protocol (auto|kitty|sixel|iterm2|off)
 ```
 
 Keys (press `?` for the live list): `1-4`/`Tab` views, `←→` GPU, `↑↓`
@@ -147,17 +147,17 @@ style, `+ -` refresh rate, `p` pause, `q` quit.
 Filter syntax: free text plus `gpu:0`, `user:alice`, `pid:1234`,
 `type:c|g`, `spill`, all ANDed.
 
-Config (`~/.config/nvtui/config.json`, `%APPDATA%\nvtui` on Windows) is
+Config (`~/.config/omnimon/config.json`, `%APPDATA%\omnimon` on Windows) is
 written on exit. Hand-edit it to rebind keys:
 
 ```json
 { "keys": { "kill": ["x", "f9"], "quit": ["q"] }, "hidden": ["host"] }
 ```
 
-Environment: `NVTUI_NVML_PATH` (explicit NVML library), `NVTUI_THEME`,
-`NVTUI_CONFIG`, `NVTUI_STATE_DIR` (history location), `NVTUI_COLOR=256`,
-`NVTUI_LOG=debug`. History lives in the platform state directory
-(`~/.local/state/nvtui`, `%LOCALAPPDATA%\nvtui`).
+Environment: `OMNIMON_NVML_PATH` (explicit NVML library), `OMNIMON_THEME`,
+`OMNIMON_CONFIG`, `OMNIMON_STATE_DIR` (history location), `OMNIMON_COLOR=256`,
+`OMNIMON_LOG=debug`. History lives in the platform state directory
+(`~/.local/state/omnimon`, `%LOCALAPPDATA%\omnimon`).
 
 ## Renaming the app
 

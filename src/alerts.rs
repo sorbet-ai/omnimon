@@ -1,5 +1,5 @@
 //! Alert hook: run a user command for notable events, e.g.
-//! `"alert_command": "notify-send nvtui \"$NVTUI_EVENT\""` or a `curl` to a
+//! `"alert_command": "notify-send omnimon \"$OMNIMON_EVENT\""` or a `curl` to a
 //! webhook. The event goes in environment variables, never into the command
 //! string, so event text can't inject shell syntax.
 
@@ -19,7 +19,7 @@ pub struct Alerts {
 
 /// The shell that runs the hook. On Windows the command goes to `cmd /C`
 /// verbatim (Rust's argument quoting would mangle it); variables are then
-/// `%NVTUI_EVENT%` rather than `$NVTUI_EVENT`.
+/// `%OMNIMON_EVENT%` rather than `$OMNIMON_EVENT`.
 fn shell(cmd: &str) -> Command {
     #[cfg(windows)]
     {

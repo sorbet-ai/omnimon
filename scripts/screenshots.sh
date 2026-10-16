@@ -15,4 +15,4 @@ shot() { # name cols rows wait args keys...
 shot overview 140 44 30 "--demo 2 -i 0.25 --theme neon"
 shot cluster 140 40 20 "--demo 8 -i 0.25 --theme catppuccin"
 shot charts 150 42 30 "--demo 1 -i 0.25 --theme neon" 2
-shot process 140 44 20 "--demo 3 -i 0.25 --theme dracula" Enter
+shot details 140 44 20 "--demo 3 -i 0.25 --theme dracula" 3
