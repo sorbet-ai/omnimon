@@ -250,7 +250,7 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
         f.render_widget(Paragraph::new(Line::from(info)), Rect { y: left.y + nbars as u16, height: 1, ..left });
     }
 
-    // Mirrored history: utilization grows up, memory hangs down.
+    // History in two lanes: utilization on top, memory below.
     if right.width > 6 {
         let chart = Rect { x: right.x + 1, width: right.width - 1, ..right };
         for y in chart.y..chart.y + chart.height {
@@ -260,28 +260,24 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
         let n = ctx.samples(chart.width);
         let Some(h) = app.store.hist.gpus.get(i) else { return };
         let series = [
-            Series { data: app.store.hist.tail(&h.util, n), grad: t.util, down: false },
-            Series { data: app.store.hist.tail(&h.mem, n), grad: mem_grad, down: true },
+            Series { data: app.store.hist.tail(&h.util, n), grad: t.util },
+            Series { data: app.store.hist.tail(&h.mem, n), grad: mem_grad },
         ];
         ctx.draw(f, chart, 1 + i as u32, &series);
         // Text over a pixel image would punch holes in it; the values are in the bars.
         if ctx.pixels() {
             return;
         }
-        let up_h = chart.height.div_ceil(2);
+        let rows = super::gfx::lanes(chart, 2);
         let label = |f: &mut Frame, text: String, y: u16| {
             let w = text.chars().count() as u16;
             if chart.width > w + 2 {
                 f.render_widget(Paragraph::new(s(text, t.dim)), Rect { x: chart.x + chart.width - w, y, width: w, height: 1 });
             }
         };
-        label(f, format!("util {}", fmt::pct(sm.util_gpu)), chart.y);
-        if chart.height > up_h {
-            label(
-                f,
-                format!("mem {}", sm.mem_frac().map(|m| format!("{:.0}%", m * 100.0)).unwrap_or("N/A".into())),
-                chart.y + chart.height - 1,
-            );
+        label(f, format!("util {}", fmt::pct(sm.util_gpu)), rows[0].y);
+        if rows[1].height > 0 {
+            label(f, format!("mem {}", sm.mem_frac().map(|m| format!("{:.0}%", m * 100.0)).unwrap_or("N/A".into())), rows[1].y);
         }
     }
 }

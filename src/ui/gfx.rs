@@ -41,12 +41,27 @@ impl ChartStyle {
     }
 }
 
-/// One data series. Values are normalized to [0,1], newest last.
+/// One data series. Values are normalized to [0,1], newest last. Several
+/// series in one chart are drawn as stacked lanes, first on top.
 pub struct Series<'a> {
     pub data: &'a [Option<f64>],
     pub grad: Gradient,
-    /// Hang from the top / middle instead of growing from the bottom.
-    pub down: bool,
+}
+
+/// Split `area` into `n` stacked lanes, top first; earlier lanes get the
+/// extra row when it doesn't divide evenly.
+pub fn lanes(area: Rect, n: usize) -> Vec<Rect> {
+    let n = n.max(1) as u16;
+    let (base, extra) = (area.height / n, area.height % n);
+    let mut y = area.y;
+    (0..n)
+        .map(|k| {
+            let h = base + u16::from(k < extra);
+            let r = Rect { y, height: h, ..area };
+            y += h;
+            r
+        })
+        .collect()
 }
 
 struct Cached {
@@ -213,8 +228,7 @@ impl ChartCtx<'_> {
         self.style == ChartStyle::Pixels && self.gfx.pixels_available()
     }
 
-    /// Draw one chart. With one `down` series, the area is split: up-series on
-    /// top, down-series hanging below (mirrored).
+    /// Draw one chart; several series go in stacked lanes (see [`lanes`]).
     pub fn draw(&self, f: &mut Frame, area: Rect, slot: u32, series: &[Series]) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -223,19 +237,10 @@ impl ChartCtx<'_> {
             self.gfx.draw_pixels(f, area, slot, self, series);
             return;
         }
-        let mirrored = series.iter().any(|s| s.down) && series.iter().any(|s| !s.down);
-        let up_h = if mirrored { area.height.div_ceil(2) } else { area.height };
-        for s in series {
-            let a = if !mirrored {
-                area
-            } else if s.down {
-                Rect { y: area.y + up_h, height: area.height - up_h, ..area }
-            } else {
-                Rect { height: up_h, ..area }
-            };
+        for (s, a) in series.iter().zip(lanes(area, series.len())) {
             match self.style {
-                ChartStyle::Braille => f.render_widget(AreaChart { data: s.data, grad: s.grad, inverted: s.down }, a),
-                _ => f.render_widget(BlockChart { data: s.data, grad: s.grad, inverted: s.down }, a),
+                ChartStyle::Braille => f.render_widget(AreaChart { data: s.data, grad: s.grad }, a),
+                _ => f.render_widget(BlockChart { data: s.data, grad: s.grad }, a),
             }
         }
     }
@@ -324,32 +329,32 @@ pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaI
     let (wf, hf) = (w as f32, h as f32);
     let scale = scale.max(0.5);
     let pad = 3.0 * scale;
-    let mirrored = series.iter().any(|s| s.down) && series.iter().any(|s| !s.down);
-
-    // Grid: quarter lines, faint.
-    let grid_col = lerp_rgb(bg, Color::Rgb(255, 255, 255), 0.07);
-    let mut grid = Paint::default();
-    grid.set_color(sk(grid_col, 1.0));
-    grid.anti_alias = false;
-    let grid_stroke = Stroke { width: 1.0, ..Default::default() };
-    for q in [0.25, 0.5, 0.75] {
-        let y = (hf * q).round() + 0.5;
+    let lane_h = hf / series.len().max(1) as f32;
+    let hline = |pm: &mut Pixmap, y: f32, strength: f64| {
+        let mut p = Paint::default();
+        p.set_color(sk(lerp_rgb(bg, Color::Rgb(255, 255, 255), strength), 1.0));
+        p.anti_alias = false;
         let mut pb = PathBuilder::new();
-        pb.move_to(0.0, y);
-        pb.line_to(wf, y);
-        if let Some(p) = pb.finish() {
-            pm.stroke_path(&p, &grid, &grid_stroke, Transform::identity(), None);
+        pb.move_to(0.0, y.round() + 0.5);
+        pb.line_to(wf, y.round() + 0.5);
+        if let Some(path) = pb.finish() {
+            pm.stroke_path(&path, &p, &Stroke { width: 1.0, ..Default::default() }, Transform::identity(), None);
+        }
+    };
+    // Faint grid at the quarters of each lane, a firmer line between lanes.
+    for k in 0..series.len() {
+        let top = k as f32 * lane_h;
+        for q in [0.25, 0.5, 0.75] {
+            hline(&mut pm, top + lane_h * q, 0.07);
+        }
+        if k > 0 {
+            hline(&mut pm, top, 0.18);
         }
     }
 
-    for s in series {
-        // Value 0 / 1 positions for this series.
-        let (y0, y1) = match (mirrored, s.down) {
-            (true, false) => (hf / 2.0, pad),
-            (true, true) => (hf / 2.0, hf - pad),
-            (false, false) => (hf - 1.0, pad),
-            (false, true) => (0.0, hf - pad),
-        };
+    for (k, s) in series.iter().enumerate() {
+        // Value 0 / 1 positions: this series' lane, growing upward.
+        let (y0, y1) = ((k + 1) as f32 * lane_h - 1.0, k as f32 * lane_h + pad);
         let n = s.data.len();
         if n == 0 {
             continue;
@@ -424,17 +429,6 @@ pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaI
         }
     }
 
-    if mirrored {
-        let mut mid = Paint::default();
-        mid.set_color(sk(lerp_rgb(bg, Color::Rgb(255, 255, 255), 0.18), 1.0));
-        let mut pb = PathBuilder::new();
-        pb.move_to(0.0, (hf / 2.0).round() + 0.5);
-        pb.line_to(wf, (hf / 2.0).round() + 0.5);
-        if let Some(p) = pb.finish() {
-            pm.stroke_path(&p, &mid, &Stroke { width: 1.0, ..Default::default() }, Transform::identity(), None);
-        }
-    }
-
     // Opaque background, so premultiplied == straight RGBA.
     RgbaImage::from_raw(w, h, pm.take()).expect("buffer size matches")
 }
@@ -484,13 +478,7 @@ mod tests {
             .collect();
         let mem: Vec<Option<f64>> = (0..240).map(|i| Some((0.25 + 0.5 * (1.0 - (-(i as f64) / 25.0).exp())).min(0.78))).collect();
         let bg = Color::Rgb(26, 27, 38);
-        let img = render(
-            1400,
-            360,
-            1.4,
-            &[Series { data: &util, grad: t.util, down: false }, Series { data: &mem, grad: t.mem, down: true }],
-            bg,
-        );
+        let img = render(1400, 360, 1.4, &[Series { data: &util, grad: t.util }, Series { data: &mem, grad: t.mem }], bg);
         img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/img/pixel-chart.png")).unwrap();
     }
 
@@ -500,22 +488,15 @@ mod tests {
         let util: Vec<Option<f64>> = (0..120).map(|i| Some((0.55 + 0.4 * ((i as f64) / 9.0).sin()).clamp(0.0, 1.0))).collect();
         let mem: Vec<Option<f64>> = (0..120).map(|i| if i < 10 { None } else { Some(0.3 + 0.002 * i as f64) }).collect();
         let bg = Color::Rgb(26, 27, 38);
-        let img =
-            render(900, 220, 1.0, &[Series { data: &util, grad: t.util, down: false }, Series { data: &mem, grad: t.mem, down: true }], bg);
+        let img = render(900, 220, 1.0, &[Series { data: &util, grad: t.util }, Series { data: &mem, grad: t.mem }], bg);
         assert_eq!(img.dimensions(), (900, 220));
         let dir = std::env::temp_dir();
-        let _ = img.save(dir.join("chart-mirrored.png"));
-        let img = render(600, 300, 1.0, &[Series { data: &util, grad: t.power, down: false }], bg);
+        let _ = img.save(dir.join("chart-lanes.png"));
+        let img = render(600, 300, 1.0, &[Series { data: &util, grad: t.power }], bg);
         let _ = img.save(dir.join("chart-single.png"));
         for l in Look::ALL {
             super::super::theme::set_look(l, bg);
-            let img = render(
-                900,
-                220,
-                1.0,
-                &[Series { data: &util, grad: t.util, down: false }, Series { data: &mem, grad: t.mem, down: true }],
-                bg,
-            );
+            let img = render(900, 220, 1.0, &[Series { data: &util, grad: t.util }, Series { data: &mem, grad: t.mem }], bg);
             let _ = img.save(dir.join(format!("chart-look-{}.png", l.name())));
         }
         super::super::theme::set_look(Look::Rainbow, bg);

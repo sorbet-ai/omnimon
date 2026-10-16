@@ -141,12 +141,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
                 let norm = |v: &[Option<f64>]| v.iter().map(|x| x.map(|x| x / max)).collect::<Vec<_>>();
                 let (up, down) = (norm(raw), norm(mraw));
                 f.render_widget(b.title_bottom(Line::from(s(format!(" peak {} ", fmt::rate(max as u64)), t.dim)).right_aligned()), cell);
-                ctx.draw(
-                    f,
-                    inner,
-                    slot,
-                    &[Series { data: &up, grad: c.grad, down: false }, Series { data: &down, grad: grad2, down: true }],
-                );
+                ctx.draw(f, inner, slot, &[Series { data: &up, grad: c.grad }, Series { data: &down, grad: grad2 }]);
             }
             None => {
                 let vals: Vec<f64> = raw.iter().flatten().copied().collect();
@@ -158,7 +153,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
                     b.title_bottom(Line::from(s(format!(" avg {:.0}%  max {:.0}% ", avg * 100.0, max * 100.0), t.dim)).right_aligned())
                 };
                 f.render_widget(b, cell);
-                ctx.draw(f, inner, slot, &[Series { data: raw, grad: c.grad, down: false }]);
+                ctx.draw(f, inner, slot, &[Series { data: raw, grad: c.grad }]);
             }
         }
     }

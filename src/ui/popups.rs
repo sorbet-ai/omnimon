@@ -224,8 +224,8 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     label(f, c1, format!("gpu memory  peak {}", if peak > 0.0 { fmt::bytes(peak as u64) } else { "N/A".into() }));
     label(f, c2, "gpu utilization".into());
     let body = |a: Rect| Rect { y: a.y + 1, height: a.height.saturating_sub(1), ..a };
-    ctx.draw(f, body(c1), 900, &[Series { data: &memn, grad: t.mem, down: false }]);
-    ctx.draw(f, body(c2), 901, &[Series { data: app.store.hist.tail(&h.sm, ctx.samples(c2.width)), grad: t.util, down: false }]);
+    ctx.draw(f, body(c1), 900, &[Series { data: &memn, grad: t.mem }]);
+    ctx.draw(f, body(c2), 901, &[Series { data: app.store.hist.tail(&h.sm, ctx.samples(c2.width)), grad: t.util }]);
 }
 
 pub(super) fn tune(f: &mut Frame, app: &App) {

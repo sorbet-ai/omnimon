@@ -59,17 +59,13 @@ impl Widget for GradBar {
 
 /// Braille area chart. `data` is normalized to [0,1], newest last; each
 /// cell holds two samples. Rows are colored along a vertical gradient.
-/// `inverted` hangs the chart from the top (for mirrored up/down charts).
 pub struct AreaChart<'a> {
     pub data: &'a [Option<f64>],
     pub grad: Gradient,
-    pub inverted: bool,
 }
 
 const LEFT_UP: [u8; 4] = [0x40, 0x04, 0x02, 0x01];
 const RIGHT_UP: [u8; 4] = [0x80, 0x20, 0x10, 0x08];
-const LEFT_DOWN: [u8; 4] = [0x01, 0x02, 0x04, 0x40];
-const RIGHT_DOWN: [u8; 4] = [0x08, 0x10, 0x20, 0x80];
 
 impl Widget for AreaChart<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -90,7 +86,7 @@ impl Widget for AreaChart<'_> {
             let l = sample(cx * 2);
             let r = sample(cx * 2 + 1);
             for row in 0..h {
-                // row counted from the baseline (bottom, or top if inverted)
+                // row counted from the baseline
                 let dots = |v: Option<f64>| -> usize {
                     match v {
                         None => 0,
@@ -106,10 +102,9 @@ impl Widget for AreaChart<'_> {
                 if ld == 0 && rd == 0 {
                     continue;
                 }
-                let (lt, rt) = if self.inverted { (&LEFT_DOWN, &RIGHT_DOWN) } else { (&LEFT_UP, &RIGHT_UP) };
-                let bits = lt[..ld].iter().chain(&rt[..rd]).fold(0u8, |b, d| b | d);
+                let bits = LEFT_UP[..ld].iter().chain(&RIGHT_UP[..rd]).fold(0u8, |b, d| b | d);
                 let ch = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
-                let y = if self.inverted { area.y + row as u16 } else { area.y + (h - 1 - row) as u16 };
+                let y = area.y + (h - 1 - row) as u16;
                 let v = l.unwrap_or(0.0).max(r.unwrap_or(0.0));
                 let top = ((v.clamp(0.0, 1.0) * total_dots).ceil() as usize).div_ceil(4).max(1) - 1;
                 let col = paint(self.grad, (row as f64 + 0.5) / h as f64, v, row == top);
@@ -145,12 +140,9 @@ impl Widget for Spark<'_> {
 
 /// Solid area chart from eighth-block characters: one sample per column,
 /// 1/8-cell vertical precision, rows colored along a vertical gradient.
-/// `inverted` hangs from the top (drawn with reversed lower blocks, which
-/// works on any background).
 pub struct BlockChart<'a> {
     pub data: &'a [Option<f64>],
     pub grad: Gradient,
-    pub inverted: bool,
 }
 
 impl Widget for BlockChart<'_> {
@@ -177,20 +169,8 @@ impl Widget for BlockChart<'_> {
                 }
                 let col = paint(self.grad, (row as f64 + 0.5) / h as f64, v, row == top);
                 let x = area.x + cx as u16;
-                if self.inverted {
-                    // Color the top `fill` eighths: a lower block of the
-                    // remainder, reversed (glyph = background, cell = color).
-                    let y = area.y + row as u16;
-                    let cell = &mut buf[(x, y)];
-                    if fill == 8 {
-                        cell.set_char('█').set_fg(col);
-                    } else {
-                        cell.set_char(LOWER[8 - fill]).set_style(Style::new().fg(col).add_modifier(ratatui::style::Modifier::REVERSED));
-                    }
-                } else {
-                    let y = area.y + (h - 1 - row) as u16;
-                    buf[(x, y)].set_char(LOWER[fill]).set_fg(col);
-                }
+                let y = area.y + (h - 1 - row) as u16;
+                buf[(x, y)].set_char(LOWER[fill]).set_fg(col);
             }
         }
     }
