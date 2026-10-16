@@ -136,6 +136,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
     if app.info.host.wsl {
         left.push(s(" [wsl]", t.accent2));
     }
+    if let Some(r) = &app.remote {
+        left.push(s(format!(" ⇢ {r}"), t.accent));
+    }
     if let Some(b) = app.info.backends.first() {
         if let Some(d) = &b.driver_version {
             left.push(s("  driver ", t.dim));

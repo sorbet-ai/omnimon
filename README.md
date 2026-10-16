@@ -52,6 +52,15 @@ workload is spilling out of VRAM.
   `hide host`, `show procs`, `charts blocks`, `interval 2`, `gpu 1`, `view events`.
 - **Headless**: `--once`, `--json`, `--json --watch` (JSON lines), `--serve`
   (Prometheus `/metrics` + `/json`), `--diagnose`.
+- **Remote**: run `--serve 0.0.0.0:9465` on a headless box and
+  `--connect box` from your laptop for the full UI (read-only; no auth, so
+  keep it on a trusted network).
+- **Alerts**: `alert_command` in the config runs on critical events (spill,
+  thermal, errors) with the event in `NVTUI_EVENT` / `NVTUI_SEVERITY` /
+  `NVTUI_GPU`, e.g. `notify-send` or `curl` to a webhook.
+- **Containers and energy**: container/pod id per process (from cgroups);
+  session energy per GPU and each process's estimated share
+  (`price_per_kwh` in the config adds cost).
 - Six themes (`t`), truecolor with automatic 256-color fallback, mouse
   support, rebindable keys, settings persist. `--demo N` simulates N GPUs.
 
@@ -123,6 +132,7 @@ nvtui                     interactive
 nvtui --once              one-shot summary with diagnosis
 nvtui --json [--watch]    snapshot / JSON lines (schema in report.rs)
 nvtui --serve [ADDR]      Prometheus exporter (default 127.0.0.1:9465)
+nvtui --connect HOST      watch another machine running --serve (read-only)
 nvtui --diagnose          what was detected, and why things are missing
 nvtui --demo 8            8 simulated GPUs
 nvtui --graphics sixel    force a graphics protocol (auto|kitty|sixel|iterm2|off)

@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use serde::{Deserialize, Serialize};
 
-use crate::collector::{Collector, Sampler};
+use crate::collector::{Sampler, Source};
 use crate::config::Config;
 use crate::host::{KillSignal, send_signal};
 use crate::model::{GpuInfo, GpuSample, PidMapping, ProcRow, Snapshot, SystemInfo};
@@ -45,6 +45,8 @@ pub struct UiOptions {
     pub readonly: bool,
     /// "auto", "off", or a protocol to force ("kitty", "sixel", "iterm2").
     pub graphics: String,
+    /// Watching another machine (`--connect`): its address.
+    pub remote: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -257,6 +259,7 @@ struct App {
     /// Command line being typed after `:`.
     cmd_edit: Option<String>,
     hidden: HashSet<Panel>,
+    remote: Option<String>,
     alerts: crate::alerts::Alerts,
     price_per_kwh: Option<f64>,
     quit: bool,
@@ -306,6 +309,7 @@ impl App {
             keymap: input::Keymap::new(&cfg.keys),
             cmd_edit: None,
             hidden: cfg.hidden.iter().filter_map(|h| Panel::parse(h)).collect(),
+            remote: opts.remote.clone(),
             alerts: crate::alerts::Alerts::new(cfg.alert_command.clone(), cfg.alert_min),
             price_per_kwh: cfg.price_per_kwh,
             quit: false,
@@ -592,7 +596,9 @@ impl App {
             }
             Action::ProcessDetails => {
                 if let Some(key) = self.sel_key {
-                    let details = self.row_by_key(key).and_then(|p| p.local_pid).and_then(crate::host::process_details).map(Box::new);
+                    // Process details come from this machine's process table.
+                    let local = if self.remote.is_some() { None } else { self.row_by_key(key).and_then(|p| p.local_pid) };
+                    let details = local.and_then(crate::host::process_details).map(Box::new);
                     self.popup = Some(Popup::Process { key, details, full_env: false });
                 }
             }
@@ -880,8 +886,8 @@ impl App {
     }
 }
 
-pub fn run(collector: Collector, info: SystemInfo, interval: Duration, opts: &UiOptions, cfg: Config) -> anyhow::Result<()> {
-    let sampler = Sampler::spawn(collector, interval);
+pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, opts: &UiOptions, cfg: Config) -> anyhow::Result<()> {
+    let sampler = Sampler::spawn(source, interval);
     let mut terminal = ratatui::init();
     crate::logging::capture(true);
     // Probe for pixel graphics after entering the alternate screen and before

@@ -10,6 +10,7 @@ mod host;
 mod logging;
 mod model;
 mod os;
+mod remote;
 mod report;
 mod serve;
 mod spill;
@@ -64,6 +65,10 @@ struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:9465", value_name = "ADDR")]
     serve: Option<String>,
 
+    /// Watch another machine running `--serve` (host[:port], default port 9465).
+    #[arg(long, value_name = "ADDR", conflicts_with_all = ["serve", "demo"])]
+    connect: Option<String>,
+
     /// Pixel graphics for charts: auto-detect, force a protocol, or off.
     #[arg(long, value_name = "auto|kitty|sixel|iterm2|off", default_value = "auto")]
     graphics: String,
@@ -75,6 +80,22 @@ fn main() -> anyhow::Result<()> {
     let cfg = config::load();
     let secs = cli.interval.or(cfg.interval).unwrap_or(1.0);
     let interval = Duration::from_secs_f64(secs.clamp(0.1, 60.0));
+
+    if let Some(addr) = &cli.connect {
+        let (source, info, first) = remote::connect(addr)?;
+        if cli.once || cli.json || cli.diagnose {
+            if cli.json {
+                report::json(&info, &first, true);
+            } else if cli.diagnose {
+                report::diagnose(&info, &first);
+            } else {
+                report::once(&info, &first, !cli.no_color);
+            }
+            return Ok(());
+        }
+        let opts = ui::UiOptions { theme: cli.theme.clone(), readonly: true, graphics: cli.graphics.clone(), remote: Some(addr.clone()) };
+        return ui::run(source, info, interval, &opts, cfg);
+    }
 
     let detected = backend::detect(cli.demo);
     let (mut collector, info) = Collector::new(detected);
@@ -104,6 +125,6 @@ fn main() -> anyhow::Result<()> {
         return serve::run(collector, info, interval, addr, &cfg);
     }
 
-    let opts = ui::UiOptions { theme: cli.theme.clone(), readonly: cli.readonly, graphics: cli.graphics.clone() };
+    let opts = ui::UiOptions { theme: cli.theme.clone(), readonly: cli.readonly, graphics: cli.graphics.clone(), remote: None };
     ui::run(collector, info, interval, &opts, cfg)
 }

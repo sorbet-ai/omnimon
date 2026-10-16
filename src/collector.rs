@@ -117,6 +117,23 @@ impl Collector {
     }
 }
 
+/// Where snapshots come from: this machine (`Collector`) or another one
+/// (`remote::Remote`).
+pub trait Source: Send {
+    /// One snapshot, or None when it couldn't be taken this time.
+    fn collect(&mut self) -> Option<Snapshot>;
+    fn apply(&mut self, gpu: usize, cmd: &Tune) -> Result<String, String>;
+}
+
+impl Source for Collector {
+    fn collect(&mut self) -> Option<Snapshot> {
+        Some(Collector::collect(self))
+    }
+    fn apply(&mut self, gpu: usize, cmd: &Tune) -> Result<String, String> {
+        Collector::apply(self, gpu, cmd)
+    }
+}
+
 /// Shared knobs between the UI and the sampler thread.
 pub struct Control {
     pub interval_ms: AtomicU64,
@@ -135,7 +152,7 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    pub fn spawn(mut c: Collector, interval: Duration) -> Self {
+    pub fn spawn(mut c: impl Source + 'static, interval: Duration) -> Self {
         // Capacity 1: if the consumer stalls (terminal suspended), drop stale
         // snapshots instead of queueing them.
         let (tx, rx): (SyncSender<Snapshot>, _) = sync_channel(1);
@@ -157,8 +174,10 @@ impl Sampler {
                         let r = c.apply(gpu, &cmd);
                         ctl2.results.lock().unwrap().push(r);
                     }
-                    if !ctl2.paused.load(Ordering::Relaxed) {
-                        match tx.try_send(c.collect()) {
+                    if !ctl2.paused.load(Ordering::Relaxed)
+                        && let Some(snap) = c.collect()
+                    {
+                        match tx.try_send(snap) {
                             Ok(()) | Err(TrySendError::Full(_)) => {}
                             Err(TrySendError::Disconnected(_)) => break,
                         }

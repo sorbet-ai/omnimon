@@ -30,8 +30,9 @@ pub struct Recorder {
     lines: usize,
 }
 
-fn path() -> Option<PathBuf> {
-    Some(crate::config::state_dir()?.join("history.jsonl"))
+fn path(host: &str) -> Option<PathBuf> {
+    let safe: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+    Some(crate::config::state_dir()?.join(format!("history-{safe}.jsonl")))
 }
 
 fn header(info: &SystemInfo) -> Header {
@@ -43,7 +44,7 @@ impl Recorder {
     /// the file, and keep it open for appending.
     pub fn open(info: &SystemInfo, now: f64) -> (Recorder, Vec<Snapshot>) {
         let want = header(info);
-        let Some(path) = path() else { return (Recorder { out: None, header: want, lines: 0 }, Vec::new()) };
+        let Some(path) = path(&want.host) else { return (Recorder { out: None, header: want, lines: 0 }, Vec::new()) };
         let mut past = Vec::new();
         if let Ok(f) = File::open(&path) {
             let mut lines = BufReader::new(f).lines().map_while(Result::ok);
@@ -62,7 +63,7 @@ impl Recorder {
 
     /// Replace the file with the header and `snaps` (keeps it bounded).
     pub fn rewrite<'a>(&mut self, snaps: impl Iterator<Item = &'a Snapshot>) {
-        let Some(path) = path() else { return };
+        let Some(path) = path(&self.header.host) else { return };
         let out = (|| -> std::io::Result<BufWriter<File>> {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
