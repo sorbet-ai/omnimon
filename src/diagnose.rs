@@ -41,11 +41,10 @@ pub fn diagnose(info: &GpuInfo, s: &GpuSample, procs: &[&ProcRow], recent: Recen
         );
     }
     if s.spill.level == SpillLevel::Spilling {
-        let slow = s.spill.slowdown.map(|x| format!(", about {x:.0}× slower for bandwidth-bound work")).unwrap_or_default();
         add(
             Severity::Crit,
             "Spilling into system memory",
-            format!("{}{slow}. Free VRAM: smaller model or batch, fewer GPU apps.", s.spill.reason),
+            format!("{}. Free VRAM: smaller model or batch, fewer GPU apps.", s.spill.reason),
         );
     } else if s.spill.level == SpillLevel::Pressure {
         add(Severity::Warn, "VRAM almost full", format!("{}; the next allocation may spill or fail", s.spill.reason));
@@ -192,7 +191,7 @@ mod tests {
             temp: Some(88),
             power_limit: Some(450.0),
             throttle: vec![Throttle::PowerCap],
-            spill: Spill { level: SpillLevel::Spilling, reason: "4.0GiB in system memory".into(), slowdown: Some(6.0), bytes: None },
+            spill: Spill { level: SpillLevel::Spilling, reason: "4.0GiB in system memory".into(), bytes: None },
             ..Default::default()
         };
         let f = diagnose(&gpu(), &s, &[], Recent::default());

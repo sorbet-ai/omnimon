@@ -122,8 +122,7 @@ pub fn diff(prev: &Snapshot, cur: &Snapshot) -> Vec<Event> {
             ev(i, Kind::MigChange, Severity::Info, None, format!("GPU {i}: MIG instance {gi} ({profile}) removed"));
         }
         if a.spill.level != SpillLevel::Spilling && b.spill.level == SpillLevel::Spilling {
-            let slow = b.spill.slowdown.filter(|x| *x >= 1.5).map(|x| format!(", ≈{x:.0}× slower")).unwrap_or_default();
-            ev(i, Kind::SpillStart, Severity::Crit, None, format!("GPU {i}: spill started, {}{slow}", b.spill.reason));
+            ev(i, Kind::SpillStart, Severity::Crit, None, format!("GPU {i}: spill started, {}", b.spill.reason));
         } else if a.spill.level == SpillLevel::Spilling && b.spill.level != SpillLevel::Spilling {
             ev(i, Kind::SpillEnd, Severity::Info, None, format!("GPU {i}: spill ended"));
         }

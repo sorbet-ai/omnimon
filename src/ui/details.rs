@@ -104,11 +104,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
             "Spill",
             match sm.spill.level {
                 SpillLevel::None => "none".into(),
-                _ => format!(
-                    "{}{}",
-                    sm.spill.reason,
-                    sm.spill.slowdown.map(|x| format!(" · ≈{x:.1}× slower when bandwidth-bound")).unwrap_or_default()
-                ),
+                _ => format!("{}{}", sm.spill.reason, ""),
             },
         ),
         (

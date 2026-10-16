@@ -21,19 +21,20 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         return;
     }
     let show = |p: super::Panel| !app.hidden.contains(&p);
-    let host_h = if show(super::Panel::Host) { 5u16 } else { 0 };
+    let host_h = if show(super::Panel::Host) { 8u16 } else { 0 };
     let procs_on = show(super::Panel::Procs);
     // The process list gets what it needs (within reason); GPU cards grow
     // into the rest, up to a cap, so a lone GPU gets a big chart.
-    let want_procs = if procs_on { (app.view.rows.len() as u16 + 4).clamp(7, 18) } else { 0 };
-    let avail = area.height.saturating_sub(host_h + want_procs);
-    let cap = if !procs_on || n == 1 { 13u16.max(avail / n as u16) } else { 10 };
-    let per_card = (avail / n as u16).min(cap);
-    let full = per_card >= 6;
+    // Cards are as tall as their bars; the process list gets the rest.
+    let needs: Vec<u16> = (0..n).map(|i| card_height(app, i)).collect();
+    let avail = area.height.saturating_sub(host_h + if procs_on { 7 } else { 0 });
+    let fair = avail / n as u16;
+    let heights: Vec<u16> = if needs.iter().sum::<u16>() <= avail { needs.clone() } else { needs.iter().map(|&h| h.min(fair)).collect() };
+    let full = heights.iter().all(|&h| h >= 6);
     let gpu_h = if !show(super::Panel::Cards) {
         0
     } else if full {
-        per_card * n as u16
+        heights.iter().sum()
     } else {
         (n as u16 + 2).min(area.height.saturating_sub(host_h + 7).max(3))
     };
@@ -42,7 +43,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
 
     if gpu_h > 0 {
         if full {
-            let rows = Layout::vertical(vec![Constraint::Length(per_card); n]).split(gpus);
+            let rows = Layout::vertical(heights.iter().map(|&h| Constraint::Length(h))).split(gpus);
             for (i, r) in rows.iter().enumerate() {
                 card(f, app, i, *r, hit);
             }
@@ -148,69 +149,14 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
         return;
     }
 
-    let left_w = if inner.width >= 110 {
-        58
-    } else if inner.width >= 80 {
-        50
-    } else {
-        inner.width
-    };
-    let [left, right] = Layout::horizontal([Constraint::Length(left_w), Constraint::Fill(1)]).areas(inner);
+    let [left, right] = split(inner);
 
-    // Bars, most important first; core ones always show (N/A is information),
-    // optional ones only when the device reports them.
-    let ratio = |v: Option<u32>, max: Option<u32>| match (v, max) {
-        (Some(v), Some(m)) if m > 0 => Some(v as f64 / m as f64),
-        _ => None,
-    };
+    let bars = card_bars(app, i, g, sm);
     let clk = sm.clock_sm.or(sm.clock_graphics);
-    let mem_grad = if sm.spill.level == SpillLevel::Spilling { t.temp } else { t.mem };
-    let core: [(&str, Option<f64>, Gradient, String); 3] = [
-        (
-            "GPU",
-            sm.util_gpu.map(|v| v as f64 / 100.0),
-            t.util,
-            // MIG GPUs only report utilization per partition (see Details).
-            if sm.util_gpu.is_none() && !sm.mig.is_empty() { "N/A (MIG)".into() } else { fmt::pct(sm.util_gpu) },
-        ),
-        ("MEM", sm.mem_frac(), mem_grad, mem_text(sm)),
-        (
-            "PWR",
-            app.power_frac(i, sm),
-            t.power,
-            match (sm.power, sm.power_limit) {
-                (Some(p), Some(l)) => format!("{p:.0}/{l:.0}W"),
-                (Some(p), None) => format!("{p:.0}W"),
-                _ => "N/A".into(),
-            },
-        ),
-    ];
-    let act = sm.activity.as_ref();
-    // Measured DRAM bandwidth (GPM) beats the memory controller's busy time.
-    let (mbw, mbw_text) = match (act.and_then(|a| a.dram_bw), g.memory_bandwidth) {
-        (Some(p), Some(peak)) => (Some(p), fmt::bandwidth(peak * p as f64 / 100.0).replace(' ', "")),
-        (Some(p), None) => (Some(p), fmt::pct(Some(p))),
-        _ => (sm.util_mem, fmt::pct(sm.util_mem)),
-    };
-    let tensor = act.and_then(|a| a.tensor);
-    let optional: [(&str, Option<f64>, Gradient, String); 8] = [
-        ("TMP", ratio(sm.temp, Some(g.temp_shutdown.unwrap_or(100))), t.temp, fmt::opt(sm.temp, "°C")),
-        ("CLK", ratio(clk, g.max_clock_sm.or(g.max_clock_graphics)), t.util, fmt::opt(clk, "MHz")),
-        ("MBW", mbw.map(|v| v as f64 / 100.0), t.mem, mbw_text),
-        ("TNS", tensor.map(|v| v as f64 / 100.0), t.util, fmt::pct(tensor)),
-        ("FAN", sm.fan().map(|v| v as f64 / 100.0), t.temp, fmt::opt(sm.fan(), "%")),
-        ("ENC", sm.enc_util.map(|v| v as f64 / 100.0), t.power, fmt::pct(sm.enc_util)),
-        ("DEC", sm.dec_util.map(|v| v as f64 / 100.0), t.power, fmt::pct(sm.dec_util)),
-        ("SYS", spill_frac(g, sm), t.temp, sm.mem_shared.map(fmt::bytes_short).unwrap_or_default()),
-    ];
-    let bars: Vec<_> = core.into_iter().chain(optional.into_iter().filter(|b| b.1.is_some())).collect();
+    let mem_grad = mem_gradient(app, sm);
     let nbars = (left.height as usize).saturating_sub(1).clamp(1, bars.len());
     for (row, (label, frac, grad, val)) in bars.into_iter().take(nbars).enumerate() {
-        let r = Rect { y: left.y + row as u16, height: 1, ..left };
-        let [lab, bar, value] = Layout::horizontal([Constraint::Length(4), Constraint::Fill(1), Constraint::Length(13)]).areas(r);
-        f.render_widget(Paragraph::new(s(label, t.dim)), lab);
-        f.render_widget(GradBar { frac, grad, track: t.track }, bar);
-        f.render_widget(Paragraph::new(s(format!(" {val}"), t.fg)), value);
+        bar_row(f, app, Rect { y: left.y + row as u16, height: 1, ..left }, label, frac, grad, &val);
     }
     if left.height as usize > nbars {
         let mut info = Vec::new();
@@ -250,35 +196,152 @@ fn card(f: &mut Frame, app: &App, i: usize, area: Rect, hit: &mut Hit) {
         f.render_widget(Paragraph::new(Line::from(info)), Rect { y: left.y + nbars as u16, height: 1, ..left });
     }
 
-    // History in two lanes: utilization on top, memory below.
-    if right.width > 6 {
-        let chart = Rect { x: right.x + 1, width: right.width - 1, ..right };
-        for y in chart.y..chart.y + chart.height {
-            f.buffer_mut()[(right.x, y)].set_char('│').set_fg(t.border);
-        }
-        let ctx = app.chart_ctx();
-        let n = ctx.samples(chart.width);
-        let Some(h) = app.store.hist.gpus.get(i) else { return };
-        let series = [
-            Series { data: app.store.hist.tail(&h.util, n), grad: t.util },
-            Series { data: app.store.hist.tail(&h.mem, n), grad: mem_grad },
-        ];
-        ctx.draw(f, chart, 1 + i as u32, &series);
-        // Text over a pixel image would punch holes in it; the values are in the bars.
-        if ctx.pixels() {
-            return;
-        }
-        let rows = super::gfx::lanes(chart, 2);
-        let label = |f: &mut Frame, text: String, y: u16| {
-            let w = text.chars().count() as u16;
-            if chart.width > w + 2 {
-                f.render_widget(Paragraph::new(s(text, t.dim)), Rect { x: chart.x + chart.width - w, y, width: w, height: 1 });
+    // History as sparkline strips, one per metric, labelled like the bars.
+    let Some(h) = app.store.hist.gpus.get(i) else { return };
+    let all = [
+        Strip { label: "GPU", ring: &h.util, grad: t.util, auto_scale: false, reported: sm.util_gpu.is_some() },
+        Strip { label: "MEM", ring: &h.mem, grad: mem_grad, auto_scale: false, reported: sm.mem_frac().is_some() },
+        Strip { label: "PWR", ring: &h.power, grad: t.power, auto_scale: false, reported: sm.power.is_some() },
+        Strip { label: "TMP", ring: &h.temp, grad: t.temp, auto_scale: false, reported: sm.temp.is_some() },
+    ];
+    strips(f, app, right, 1 + i as u32, &all);
+}
+
+type Bar = (&'static str, Option<f64>, Gradient, String);
+
+/// Memory turns hot-colored while it spills.
+fn mem_gradient(app: &App, sm: &GpuSample) -> Gradient {
+    let t = app.theme();
+    if sm.spill.level == SpillLevel::Spilling { t.temp } else { t.mem }
+}
+
+/// A GPU card's bars, most important first: core ones always (N/A is
+/// information), optional ones only when the device reports them.
+fn card_bars(app: &App, i: usize, g: &GpuInfo, sm: &GpuSample) -> Vec<Bar> {
+    let t = app.theme();
+    let ratio = |v: Option<u32>, max: Option<u32>| match (v, max) {
+        (Some(v), Some(m)) if m > 0 => Some(v as f64 / m as f64),
+        _ => None,
+    };
+    let clk = sm.clock_sm.or(sm.clock_graphics);
+    let mem_grad = mem_gradient(app, sm);
+    let core: [Bar; 3] = [
+        (
+            "GPU",
+            sm.util_gpu.map(|v| v as f64 / 100.0),
+            t.util,
+            // MIG GPUs only report utilization per partition (see Details).
+            if sm.util_gpu.is_none() && !sm.mig.is_empty() { "N/A (MIG)".into() } else { fmt::pct(sm.util_gpu) },
+        ),
+        ("MEM", sm.mem_frac(), mem_grad, mem_text(sm)),
+        (
+            "PWR",
+            app.power_frac(i, sm),
+            t.power,
+            match (sm.power, sm.power_limit) {
+                (Some(p), Some(l)) => format!("{p:.0}/{l:.0}W"),
+                (Some(p), None) => format!("{p:.0}W"),
+                _ => "N/A".into(),
+            },
+        ),
+    ];
+    let act = sm.activity.as_ref();
+    // Measured DRAM bandwidth (GPM) beats the memory controller's busy time.
+    let (mbw, mbw_text) = match (act.and_then(|a| a.dram_bw), g.memory_bandwidth) {
+        (Some(p), Some(peak)) => (Some(p), fmt::bandwidth(peak * p as f64 / 100.0).replace(' ', "")),
+        (Some(p), None) => (Some(p), fmt::pct(Some(p))),
+        _ => (sm.util_mem, fmt::pct(sm.util_mem)),
+    };
+    let tensor = act.and_then(|a| a.tensor);
+    let optional: [Bar; 8] = [
+        ("TMP", ratio(sm.temp, Some(g.temp_shutdown.unwrap_or(100))), t.temp, fmt::opt(sm.temp, "°C")),
+        ("CLK", ratio(clk, g.max_clock_sm.or(g.max_clock_graphics)), t.util, fmt::opt(clk, "MHz")),
+        ("MBW", mbw.map(|v| v as f64 / 100.0), t.mem, mbw_text),
+        ("TNS", tensor.map(|v| v as f64 / 100.0), t.util, fmt::pct(tensor)),
+        ("FAN", sm.fan().map(|v| v as f64 / 100.0), t.temp, fmt::opt(sm.fan(), "%")),
+        ("ENC", sm.enc_util.map(|v| v as f64 / 100.0), t.power, fmt::pct(sm.enc_util)),
+        ("DEC", sm.dec_util.map(|v| v as f64 / 100.0), t.power, fmt::pct(sm.dec_util)),
+        ("SYS", spill_frac(g, sm), t.temp, sm.mem_shared.map(fmt::bytes_short).unwrap_or_default()),
+    ];
+    core.into_iter().chain(optional.into_iter().filter(|b| b.1.is_some())).collect()
+}
+
+/// Rows a full card needs: its bars, the info line and the border.
+fn card_height(app: &App, i: usize) -> u16 {
+    match (app.gpu(i), app.sample(i)) {
+        (Some(g), Some(sm)) => card_bars(app, i, g, sm).len() as u16 + 3,
+        _ => 6,
+    }
+}
+
+/// Left column for labelled bars, right column for history: the same split
+/// for GPU cards and the host panel.
+fn split(inner: Rect) -> [Rect; 2] {
+    let left_w = if inner.width >= 110 {
+        58
+    } else if inner.width >= 80 {
+        50
+    } else {
+        inner.width
+    };
+    Layout::horizontal([Constraint::Length(left_w), Constraint::Fill(1)]).areas(inner)
+}
+
+/// "LBL ████████░░░░  value": one bar row.
+fn bar_row(f: &mut Frame, app: &App, r: Rect, label: &str, frac: Option<f64>, grad: Gradient, val: &str) {
+    let t = app.theme();
+    let [lab, bar, value] = Layout::horizontal([Constraint::Length(4), Constraint::Fill(1), Constraint::Length(13)]).areas(r);
+    f.render_widget(Paragraph::new(s(label.to_string(), t.dim)), lab);
+    f.render_widget(GradBar { frac, grad, track: t.track }, bar);
+    f.render_widget(Paragraph::new(s(format!(" {val}"), t.fg)), value);
+}
+
+/// One sparkline strip: a history ring, normalized to [0,1] unless
+/// `auto_scale` (rates: scaled to the window's peak).
+struct Strip<'a> {
+    label: &'static str,
+    ring: &'a super::history::Ring,
+    grad: Gradient,
+    auto_scale: bool,
+    /// The device reports this metric (strips for missing ones are skipped).
+    reported: bool,
+}
+
+/// History as stacked strips with a label column, as many as fit at two
+/// rows each (at least two).
+fn strips(f: &mut Frame, app: &App, area: Rect, slot: u32, all: &[Strip]) {
+    let t = app.theme();
+    if area.width <= 10 || area.height == 0 {
+        return;
+    }
+    for y in area.y..area.y + area.height {
+        f.buffer_mut()[(area.x, y)].set_char('│').set_fg(t.border);
+    }
+    let fit = (area.height as usize / 2).max(2);
+    let shown: Vec<&Strip> = all.iter().filter(|m| m.reported).take(fit).collect();
+    if shown.is_empty() {
+        return;
+    }
+    let labels = Rect { x: area.x + 2, width: 4, ..area };
+    let chart = Rect { x: area.x + 6, width: area.width - 6, ..area };
+    let ctx = app.chart_ctx();
+    let n = ctx.samples(chart.width);
+    let data: Vec<Vec<Option<f64>>> = shown
+        .iter()
+        .map(|m| {
+            let raw = app.store.hist.tail(m.ring, n);
+            if !m.auto_scale {
+                return raw.to_vec();
             }
-        };
-        label(f, format!("util {}", fmt::pct(sm.util_gpu)), rows[0].y);
-        if rows[1].height > 0 {
-            label(f, format!("mem {}", sm.mem_frac().map(|m| format!("{:.0}%", m * 100.0)).unwrap_or("N/A".into())), rows[1].y);
-        }
+            let max = raw.iter().flatten().copied().fold(1.0f64, f64::max);
+            raw.iter().map(|v| v.map(|x| x / max)).collect()
+        })
+        .collect();
+    let series: Vec<Series> = shown.iter().zip(&data).map(|(m, d)| Series { data: d, grad: m.grad }).collect();
+    ctx.draw(f, chart, slot, &series);
+    for (m, lane) in shown.iter().zip(super::gfx::lanes(labels, shown.len())) {
+        let y = lane.y + lane.height.saturating_sub(1) / 2;
+        f.render_widget(Paragraph::new(s(m.label, t.dim)), Rect { y, height: 1, ..lane });
     }
 }
 
@@ -361,95 +424,72 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
     }
     let inner = b.inner(area).inner(Margin { horizontal: 1, vertical: 0 });
     f.render_widget(b, area);
-    if inner.height < 2 {
+    if inner.height == 0 {
         return;
     }
-    let half = inner.width / 2;
-    let bar_w = half.saturating_sub(16).max(6);
-    let row0 = Rect { height: 1, ..inner };
-    let row1 = Rect { y: inner.y + 1, height: 1, ..inner };
-
-    // CPU: total bar + a per-core heat strip + recent history.
-    let [cl, cbar, cval, cores] =
-        Layout::horizontal([Constraint::Length(4), Constraint::Length(bar_w), Constraint::Length(7), Constraint::Fill(1)]).areas(row0);
-    f.render_widget(Paragraph::new(s("CPU", t.dim)), cl);
-    f.render_widget(GradBar { frac: Some(h.cpu as f64 / 100.0), grad: t.cpu, track: t.track }, cbar);
-    f.render_widget(Paragraph::new(s(format!(" {:>4.0}%", h.cpu), t.fg)), cval);
-    const BLK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let end = cores.x + cores.width;
-    let mut x = cores.x + 1;
-    for c in &h.per_core {
-        if x >= end {
-            break;
-        }
-        let v = (*c as f64 / 100.0).clamp(0.0, 1.0);
-        f.buffer_mut()[(x, cores.y)].set_char(BLK[((v * 8.0).round() as usize).max(1)]).set_fg(t.cpu.at(v)).set_bg(t.track);
-        x += 1;
-    }
-    if x + 12 < end {
-        let rest = Rect { x: x + 1, width: end - x - 1, ..cores };
-        f.render_widget(Spark { data: app.store.hist.tail(&app.store.hist.cpu, rest.width as usize), grad: t.cpu }, rest);
-    }
-
-    // Memory + swap.
-    let [ml, mbar, mval, sl, sbar, sval] = Layout::horizontal([
-        Constraint::Length(4),
-        Constraint::Length(bar_w),
-        Constraint::Length(13),
-        Constraint::Length(5),
-        Constraint::Fill(1),
-        Constraint::Length(13),
-    ])
-    .areas(row1);
+    let [left, right] = split(inner);
+    let row = |k: u16| (k < left.height).then(|| Rect { y: left.y + k, height: 1, ..left });
     let frac = |u: u64, tot: u64| (tot > 0).then(|| u as f64 / tot as f64);
-    f.render_widget(Paragraph::new(s("MEM", t.dim)), ml);
-    f.render_widget(GradBar { frac: frac(h.mem_used, h.mem_total), grad: t.mem, track: t.track }, mbar);
-    f.render_widget(Paragraph::new(s(format!(" {}/{}", fmt::bytes_short(h.mem_used), fmt::bytes_short(h.mem_total)), t.fg)), mval);
-    f.render_widget(Paragraph::new(s(" SWP", t.dim)), sl);
-    f.render_widget(GradBar { frac: frac(h.swap_used, h.swap_total).or(Some(0.0)), grad: t.mem, track: t.track }, sbar);
-    f.render_widget(Paragraph::new(s(format!(" {}/{}", fmt::bytes_short(h.swap_used), fmt::bytes_short(h.swap_total)), t.fg)), sval);
-
-    // Network + disk throughput with recent history (auto-scaled sparklines).
-    if inner.height < 3 {
-        return;
-    }
-    let row2 = Rect { y: inner.y + 2, height: 1, ..inner };
-    let [nl, nval, nspark, dl, dval, dspark] = Layout::horizontal([
-        Constraint::Length(4),
-        Constraint::Length(22),
-        Constraint::Length(half.saturating_sub(26).max(4)),
-        Constraint::Length(5),
-        Constraint::Length(22),
-        Constraint::Fill(1),
-    ])
-    .areas(row2);
     let rate = |v: Option<u64>| v.map(fmt::rate).unwrap_or_else(|| "N/A".into());
-    f.render_widget(Paragraph::new(s("NET", t.dim)), nl);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            s(" ▼", t.accent),
-            s(format!("{:<9}", rate(h.net_rx)), t.fg),
-            s("▲", t.accent2),
-            s(rate(h.net_tx), t.fg),
-        ])),
-        nval,
-    );
-    let scaled = |r: &[Option<f64>]| {
-        let max = r.iter().flatten().copied().fold(1.0f64, f64::max);
-        r.iter().map(|v| v.map(|x| x / max)).collect::<Vec<_>>()
-    };
-    let rx = scaled(app.store.hist.tail(&app.store.hist.net_rx, nspark.width as usize));
-    f.render_widget(Spark { data: &rx, grad: t.mem }, nspark);
-    f.render_widget(Paragraph::new(s(" DSK", t.dim)), dl);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            s(" r ", t.dim),
-            s(format!("{:<9}", rate(h.disk_read)), t.fg),
-            s("w ", t.dim),
-            s(rate(h.disk_write), t.fg),
-        ])),
-        dval,
-    );
-    let disk = scaled(app.store.hist.tail(&app.store.hist.disk, dspark.width as usize));
-    f.render_widget(Spark { data: &disk, grad: t.power }, Rect { x: dspark.x + 1, width: dspark.width.saturating_sub(1), ..dspark });
+
+    if let Some(r) = row(0) {
+        bar_row(f, app, r, "CPU", Some(h.cpu as f64 / 100.0), t.cpu, &format!("{:.0}%", h.cpu));
+    }
+    // Per-core load, one cell per core (averaged when there are more cores
+    // than cells).
+    if let Some(r) = row(1).filter(|_| !h.per_core.is_empty()) {
+        const BLK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        f.render_widget(Paragraph::new(s("CORE", t.dim)), Rect { width: 4, ..r });
+        let cells = r.width.saturating_sub(19) as usize;
+        let per = h.per_core.len().div_ceil(cells.max(1));
+        for (k, chunk) in h.per_core.chunks(per.max(1)).take(cells).enumerate() {
+            let v = (chunk.iter().sum::<f32>() / chunk.len() as f32 / 100.0).clamp(0.0, 1.0) as f64;
+            f.buffer_mut()[(r.x + 5 + k as u16, r.y)]
+                .set_char(BLK[((v * 8.0).round() as usize).max(1)])
+                .set_fg(super::theme::paint(t.cpu, v, v, true))
+                .set_bg(t.track);
+        }
+    }
+    if let Some(r) = row(2) {
+        let txt = format!("{}/{}", fmt::bytes_short(h.mem_used), fmt::bytes_short(h.mem_total));
+        bar_row(f, app, r, "MEM", frac(h.mem_used, h.mem_total), t.mem, &txt);
+    }
+    if let Some(r) = row(3) {
+        let txt =
+            if h.swap_total == 0 { "none".into() } else { format!("{}/{}", fmt::bytes_short(h.swap_used), fmt::bytes_short(h.swap_total)) };
+        bar_row(f, app, r, "SWP", frac(h.swap_used, h.swap_total).or(Some(0.0)), t.mem, &txt);
+    }
+    if let Some(r) = row(4) {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                s("NET ", t.dim),
+                s("▼", t.accent),
+                s(format!("{:<10}", rate(h.net_rx)), t.fg),
+                s("▲", t.accent2),
+                s(rate(h.net_tx), t.fg),
+            ])),
+            r,
+        );
+    }
+    if let Some(r) = row(5) {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                s("DSK ", t.dim),
+                s("r ", t.dim),
+                s(format!("{:<9}", rate(h.disk_read)), t.fg),
+                s("w ", t.dim),
+                s(rate(h.disk_write), t.fg),
+            ])),
+            r,
+        );
+    }
+
+    let hist = &app.store.hist;
+    let all = [
+        Strip { label: "CPU", ring: &hist.cpu, grad: t.cpu, auto_scale: false, reported: true },
+        Strip { label: "MEM", ring: &hist.mem, grad: t.mem, auto_scale: false, reported: true },
+        Strip { label: "NET", ring: &hist.net_rx, grad: t.power, auto_scale: true, reported: h.net_rx.is_some() },
+        Strip { label: "DSK", ring: &hist.disk, grad: t.temp, auto_scale: true, reported: h.disk_read.is_some() },
+    ];
+    strips(f, app, right, 50, &all);
 }

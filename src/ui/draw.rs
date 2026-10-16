@@ -83,10 +83,7 @@ pub(super) fn severity_color(t: &Theme, sev: u8, normal: Color) -> Color {
 /// One-line spill summary for a GPU, if any.
 pub(super) fn spill_text(s: &GpuSample) -> Option<String> {
     match s.spill.level {
-        SpillLevel::Spilling => {
-            let slow = s.spill.slowdown.filter(|x| *x >= 1.5).map(|x| format!(" · ≈{x:.0}× slower")).unwrap_or_default();
-            Some(format!("SPILL {}{slow}", s.spill.reason))
-        }
+        SpillLevel::Spilling => Some(format!("SPILL {}", s.spill.reason)),
         SpillLevel::Pressure => Some(s.spill.reason.clone()),
         SpillLevel::None => None,
     }

@@ -149,6 +149,8 @@ struct App {
     toast: Option<(String, Instant, bool)>,
     theme: usize,
     look: Look,
+    /// The look to persist: only an explicit choice (`L`, `:look`).
+    saved_look: Option<Look>,
     truecolor: bool,
     readonly: bool,
     paused: bool,
@@ -189,6 +191,7 @@ impl App {
             toast: None,
             theme,
             look: opts.look.as_deref().and_then(Look::parse).or(cfg.look).unwrap_or_default(),
+            saved_look: cfg.look,
             truecolor: theme::truecolor_supported(),
             readonly: opts.readonly,
             paused: false,
@@ -467,6 +470,7 @@ impl App {
             Action::Look => {
                 let i = Look::ALL.iter().position(|l| *l == self.look).unwrap_or(0);
                 self.look = Look::ALL[(i + 1) % Look::ALL.len()];
+                self.saved_look = Some(self.look);
                 self.toast(format!("chart colors: {}", self.look.name()), false);
             }
             Action::Theme => {
@@ -547,6 +551,7 @@ impl App {
             "look" | "colors" => {
                 self.look = Look::parse(arg)
                     .ok_or_else(|| format!("looks: {}", Look::ALL.iter().map(|l| l.name()).collect::<Vec<_>>().join(", ")))?;
+                self.saved_look = Some(self.look);
                 Ok(format!("chart colors: {arg}"))
             }
             "charts" => {
@@ -740,7 +745,7 @@ impl App {
             c.sort_desc = Some(self.view.spec.desc);
             c.full_cmd = Some(self.view.full_cmd);
             c.chart_style = self.saved_chart_style;
-            c.look = Some(self.look);
+            c.look = self.saved_look;
             c.hidden = Panel::ALL.into_iter().filter(|p| self.hidden.contains(p)).collect();
         });
     }

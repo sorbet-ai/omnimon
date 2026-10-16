@@ -67,7 +67,7 @@ pub struct GpuInfo {
     pub compute_capability: Option<String>,
     pub cores: Option<u32>,
     pub memory_total: Option<u64>,
-    /// Peak memory bandwidth, bytes/s (for spill slowdown estimates).
+    /// Peak memory bandwidth, bytes/s.
     pub memory_bandwidth: Option<f64>,
     /// Unified memory (APUs / Apple Silicon): VRAM is system RAM.
     pub integrated: bool,
@@ -253,8 +253,6 @@ pub struct Spill {
     pub level: SpillLevel,
     /// Bytes of GPU allocations living in system memory.
     pub bytes: Option<u64>,
-    /// Estimated slowdown factor for bandwidth-bound work (e.g. 5.0 = 5x).
-    pub slowdown: Option<f64>,
     /// Short human-readable evidence.
     pub reason: String,
 }

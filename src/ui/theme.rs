@@ -6,10 +6,21 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 
+/// A metric's colors: three stops for scale-colored looks, and one solid
+/// color (distinct per metric) for flat looks.
 #[derive(Clone, Copy)]
-pub struct Gradient(pub [Color; 3]);
+pub struct Gradient(pub [Color; 3], pub Color);
 
 impl Gradient {
+    /// Stops low -> high; `solid` picks which stop is the metric's flat color.
+    const fn new(stops: [Color; 3], solid: usize) -> Self {
+        Gradient(stops, stops[solid])
+    }
+
+    pub fn solid(&self) -> Color {
+        self.1
+    }
+
     /// Color at `t` in [0,1] across low -> mid -> high.
     pub fn at(&self, t: f64) -> Color {
         let t = t.clamp(0.0, 1.0);
@@ -39,9 +50,9 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
 #[serde(rename_all = "lowercase")]
 pub enum Look {
     /// Color runs along the scale (green at the bottom, red at the top).
-    #[default]
     Rainbow,
     /// One calm color per metric, a brighter top edge.
+    #[default]
     Mono,
     /// Each column / bar takes the color of its own value: calm when low,
     /// hot only when high.
@@ -53,7 +64,7 @@ pub enum Look {
 }
 
 impl Look {
-    pub const ALL: [Look; 5] = [Look::Rainbow, Look::Mono, Look::Heat, Look::Outline, Look::Minimal];
+    pub const ALL: [Look; 5] = [Look::Mono, Look::Rainbow, Look::Heat, Look::Outline, Look::Minimal];
     pub fn name(self) -> &'static str {
         match self {
             Look::Rainbow => "rainbow",
@@ -102,13 +113,13 @@ pub fn paint(g: Gradient, pos: f64, value: f64, edge: bool) -> Color {
     match look() {
         Look::Rainbow => g.at(pos),
         Look::Mono => {
-            let c = g.0[0];
+            let c = g.solid();
             if edge { c } else { lerp(c, bg(), 0.25) }
         }
         // Calm (the low color) up to ~40%, hottest at 100%.
         Look::Heat => g.at(((value - 0.4) / 0.6).clamp(0.0, 1.0)),
         Look::Outline => {
-            let c = g.0[0];
+            let c = g.solid();
             if edge { c } else { lerp(c, bg(), 0.78) }
         }
         Look::Minimal => {
@@ -161,11 +172,11 @@ pub const THEMES: &[Theme] = &[
         crit: rgb(0xff5370),
         track: rgb(0x222436),
         sel_bg: rgb(0x2f334d),
-        util: Gradient([rgb(0x4fd6be), rgb(0xffc777), rgb(0xff5370)]),
-        mem: Gradient([rgb(0x65bcff), rgb(0xc099ff), rgb(0xff007c)]),
-        power: Gradient([rgb(0xc3e88d), rgb(0xff966c), rgb(0xff5370)]),
-        temp: Gradient([rgb(0x65bcff), rgb(0xffc777), rgb(0xff5370)]),
-        cpu: Gradient([rgb(0x4fd6be), rgb(0xffc777), rgb(0xff5370)]),
+        util: Gradient::new([rgb(0x4fd6be), rgb(0xffc777), rgb(0xff5370)], 0),
+        mem: Gradient::new([rgb(0x65bcff), rgb(0xc099ff), rgb(0xff007c)], 1),
+        power: Gradient::new([rgb(0xc3e88d), rgb(0xff966c), rgb(0xff5370)], 1),
+        temp: Gradient::new([rgb(0x65bcff), rgb(0xffc777), rgb(0xff5370)], 2),
+        cpu: Gradient::new([rgb(0x4fd6be), rgb(0xffc777), rgb(0xff5370)], 0),
     },
     Theme {
         name: "catppuccin",
@@ -182,11 +193,11 @@ pub const THEMES: &[Theme] = &[
         crit: rgb(0xf38ba8),
         track: rgb(0x262637),
         sel_bg: rgb(0x313244),
-        util: Gradient([rgb(0xa6e3a1), rgb(0xf9e2af), rgb(0xf38ba8)]),
-        mem: Gradient([rgb(0x89b4fa), rgb(0xcba6f7), rgb(0xf5c2e7)]),
-        power: Gradient([rgb(0xa6e3a1), rgb(0xfab387), rgb(0xf38ba8)]),
-        temp: Gradient([rgb(0x74c7ec), rgb(0xf9e2af), rgb(0xf38ba8)]),
-        cpu: Gradient([rgb(0x94e2d5), rgb(0xf9e2af), rgb(0xf38ba8)]),
+        util: Gradient::new([rgb(0xa6e3a1), rgb(0xf9e2af), rgb(0xf38ba8)], 0),
+        mem: Gradient::new([rgb(0x89b4fa), rgb(0xcba6f7), rgb(0xf5c2e7)], 1),
+        power: Gradient::new([rgb(0xa6e3a1), rgb(0xfab387), rgb(0xf38ba8)], 1),
+        temp: Gradient::new([rgb(0x74c7ec), rgb(0xf9e2af), rgb(0xf38ba8)], 2),
+        cpu: Gradient::new([rgb(0x94e2d5), rgb(0xf9e2af), rgb(0xf38ba8)], 0),
     },
     Theme {
         name: "dracula",
@@ -203,11 +214,11 @@ pub const THEMES: &[Theme] = &[
         crit: rgb(0xff5555),
         track: rgb(0x2a2c3a),
         sel_bg: rgb(0x44475a),
-        util: Gradient([rgb(0x50fa7b), rgb(0xf1fa8c), rgb(0xff5555)]),
-        mem: Gradient([rgb(0x8be9fd), rgb(0xbd93f9), rgb(0xff79c6)]),
-        power: Gradient([rgb(0x50fa7b), rgb(0xffb86c), rgb(0xff5555)]),
-        temp: Gradient([rgb(0x8be9fd), rgb(0xf1fa8c), rgb(0xff5555)]),
-        cpu: Gradient([rgb(0x50fa7b), rgb(0xf1fa8c), rgb(0xff5555)]),
+        util: Gradient::new([rgb(0x50fa7b), rgb(0xf1fa8c), rgb(0xff5555)], 0),
+        mem: Gradient::new([rgb(0x8be9fd), rgb(0xbd93f9), rgb(0xff79c6)], 1),
+        power: Gradient::new([rgb(0x50fa7b), rgb(0xffb86c), rgb(0xff5555)], 1),
+        temp: Gradient::new([rgb(0x8be9fd), rgb(0xf1fa8c), rgb(0xff5555)], 2),
+        cpu: Gradient::new([rgb(0x50fa7b), rgb(0xf1fa8c), rgb(0xff5555)], 0),
     },
     Theme {
         name: "nord",
@@ -224,11 +235,11 @@ pub const THEMES: &[Theme] = &[
         crit: rgb(0xbf616a),
         track: rgb(0x2b303b),
         sel_bg: rgb(0x3b4252),
-        util: Gradient([rgb(0xa3be8c), rgb(0xebcb8b), rgb(0xbf616a)]),
-        mem: Gradient([rgb(0x81a1c1), rgb(0xb48ead), rgb(0xd08770)]),
-        power: Gradient([rgb(0xa3be8c), rgb(0xd08770), rgb(0xbf616a)]),
-        temp: Gradient([rgb(0x5e81ac), rgb(0xebcb8b), rgb(0xbf616a)]),
-        cpu: Gradient([rgb(0x8fbcbb), rgb(0xebcb8b), rgb(0xbf616a)]),
+        util: Gradient::new([rgb(0xa3be8c), rgb(0xebcb8b), rgb(0xbf616a)], 0),
+        mem: Gradient::new([rgb(0x81a1c1), rgb(0xb48ead), rgb(0xd08770)], 1),
+        power: Gradient::new([rgb(0xa3be8c), rgb(0xd08770), rgb(0xbf616a)], 1),
+        temp: Gradient::new([rgb(0x5e81ac), rgb(0xebcb8b), rgb(0xbf616a)], 2),
+        cpu: Gradient::new([rgb(0x8fbcbb), rgb(0xebcb8b), rgb(0xbf616a)], 0),
     },
     Theme {
         name: "matrix",
@@ -245,11 +256,11 @@ pub const THEMES: &[Theme] = &[
         crit: rgb(0xff4f4f),
         track: rgb(0x0f2414),
         sel_bg: rgb(0x173a20),
-        util: Gradient([rgb(0x0f8a2e), rgb(0x39ff6a), rgb(0xd4ff3a)]),
-        mem: Gradient([rgb(0x0f6a5a), rgb(0x2ee6c0), rgb(0xa0fff0)]),
-        power: Gradient([rgb(0x0f8a2e), rgb(0xa8e03a), rgb(0xffd23a)]),
-        temp: Gradient([rgb(0x0f8a2e), rgb(0xd4ff3a), rgb(0xff4f4f)]),
-        cpu: Gradient([rgb(0x0f8a2e), rgb(0x39ff6a), rgb(0xd4ff3a)]),
+        util: Gradient::new([rgb(0x0f8a2e), rgb(0x39ff6a), rgb(0xd4ff3a)], 0),
+        mem: Gradient::new([rgb(0x0f6a5a), rgb(0x2ee6c0), rgb(0xa0fff0)], 1),
+        power: Gradient::new([rgb(0x0f8a2e), rgb(0xa8e03a), rgb(0xffd23a)], 1),
+        temp: Gradient::new([rgb(0x0f8a2e), rgb(0xd4ff3a), rgb(0xff4f4f)], 2),
+        cpu: Gradient::new([rgb(0x0f8a2e), rgb(0x39ff6a), rgb(0xd4ff3a)], 0),
     },
     Theme {
         name: "mono",
@@ -266,11 +277,11 @@ pub const THEMES: &[Theme] = &[
         crit: Color::White,
         track: Color::Reset,
         sel_bg: Color::DarkGray,
-        util: Gradient([Color::Gray, Color::Gray, Color::White]),
-        mem: Gradient([Color::Gray, Color::Gray, Color::White]),
-        power: Gradient([Color::Gray, Color::Gray, Color::White]),
-        temp: Gradient([Color::Gray, Color::Gray, Color::White]),
-        cpu: Gradient([Color::Gray, Color::Gray, Color::White]),
+        util: Gradient::new([Color::Gray, Color::Gray, Color::White], 0),
+        mem: Gradient::new([Color::Gray, Color::Gray, Color::White], 1),
+        power: Gradient::new([Color::Gray, Color::Gray, Color::White], 1),
+        temp: Gradient::new([Color::Gray, Color::Gray, Color::White], 2),
+        cpu: Gradient::new([Color::Gray, Color::Gray, Color::White], 0),
     },
 ];
 

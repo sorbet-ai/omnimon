@@ -86,6 +86,8 @@ pub struct ProcHist {
 pub struct History {
     pub gpus: Vec<GpuHist>,
     pub cpu: Ring,
+    /// Host memory in use, fraction of total.
+    pub mem: Ring,
     /// Bytes/s.
     pub net_rx: Ring,
     pub net_tx: Ring,
@@ -117,7 +119,7 @@ impl History {
                     r.push(gap, None);
                 }
             }
-            for r in [&mut self.cpu, &mut self.net_rx, &mut self.net_tx, &mut self.disk] {
+            for r in [&mut self.cpu, &mut self.mem, &mut self.net_rx, &mut self.net_tx, &mut self.disk] {
                 r.push(gap, None);
             }
         }
@@ -149,6 +151,7 @@ impl History {
             h.dram.push(t, act.and_then(|a| a.dram_bw).map(|v| v as f64 / 100.0));
         }
         self.cpu.push(t, Some(s.host.cpu as f64 / 100.0));
+        self.mem.push(t, (s.host.mem_total > 0).then(|| s.host.mem_used as f64 / s.host.mem_total as f64));
         self.net_rx.push(t, s.host.net_rx.map(|v| v as f64));
         self.net_tx.push(t, s.host.net_tx.map(|v| v as f64));
         self.disk.push(

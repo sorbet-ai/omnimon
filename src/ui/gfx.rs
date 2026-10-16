@@ -293,7 +293,7 @@ fn run_shader(grad: Gradient, run: &[(f32, f32)], y0: f32, y1: f32, alpha: [f32;
     match look() {
         Look::Rainbow => shader(grad, y0, y1, alpha),
         Look::Mono => {
-            let c = grad.0[0];
+            let c = grad.solid();
             if line {
                 flat(c, alpha[2])
             } else {
@@ -306,7 +306,7 @@ fn run_shader(grad: Gradient, run: &[(f32, f32)], y0: f32, y1: f32, alpha: [f32;
                 )
             }
         }
-        Look::Outline => flat(grad.0[0], if line { alpha[2] } else { 0.10 }),
+        Look::Outline => flat(grad.solid(), if line { alpha[2] } else { 0.10 }),
         // Color follows the value along the line: a horizontal gradient with
         // a stop per sample.
         Look::Heat | Look::Minimal => {

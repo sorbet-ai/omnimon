@@ -19,7 +19,7 @@ spilling out of VRAM.
 | AMD / Intel on Linux | ✓ | ✗ | experimental¹ |
 | AMD / Intel on Windows | ✗ | ✗ | ✓¹ |
 | Apple Silicon, no sudo, per-process GPU % | partial | ✗ | ✓ |
-| Measured VRAM spill per process, with slowdown estimate | ✗ | ✗ | ✓ |
+| Measured VRAM spill per process | ✗ | ✗ | ✓ |
 | Rewind through recent history, across restarts | ✗ | ✗ | ✓ |
 | Prometheus / JSON exporter built in | ✗ | separate package | ✓ |
 
@@ -96,18 +96,14 @@ bandwidth. Nothing crashes; it just gets several times slower. (Windows'
 NVIDIA "sysmem fallback" does this silently; so does a model partly offloaded
 to the CPU.)
 
-omnimon reports **measured** spill only:
+omnimon reports **measured** spill only: GPU allocations living in system
+memory (Windows WDDM "Shared Usage", AMD GTT) while VRAM is nearly full
+(95%+). They show per process in `SYS-MEM` with a `!`, as a total on the GPU
+card, and as a timeline event when a process starts spilling.
 
-- per process: GPU allocations living in system memory (Windows WDDM "Shared
-  Usage", AMD GTT), shown in `SYS-MEM` with a `!` and in the process popup;
-- per GPU: total spilled bytes and an estimate of the slowdown for
-  bandwidth-bound work, `1 / ((1-f) + f · VRAM bandwidth / PCIe bandwidth)`,
-  from the card's real memory bus and link;
-- a timeline event when a process starts spilling.
-
+Shared memory alone isn't counted: the desktop compositor, pinned staging
+buffers and WSL's VM worker all keep allocations there with VRAM to spare.
 VRAM above 98% full is shown as information ("pressure"), not as an alarm.
-Desktop processes keep a little shared memory normally; small amounts only
-count as spill while VRAM is under pressure.
 
 ## Platforms and data sources
 
@@ -238,7 +234,7 @@ src/
     windows.rs     WDDM counters, adapter enumeration
   collector.rs     samples all backends + host into a Snapshot; sampler thread
   host.rs          CPU/RAM/net/disk, process join, process details, signals
-  spill.rs         spill detection and slowdown estimate
+  spill.rs         spill detection
   diagnose.rs      "why is it slow?" findings
   events.rs        event timeline from consecutive snapshots (typed kinds)
   alerts.rs        alert hook: runs a command for notable events
