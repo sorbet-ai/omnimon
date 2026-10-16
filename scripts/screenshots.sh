@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 FONT=${FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf}
 PY=${PY:-python3}
 mkdir -p docs/img
+# Defaults only: no saved theme, chart style or history from this machine.
+export OMNIMON_CONFIG=/tmp/omnimon-shots/config.json OMNIMON_STATE_DIR=/tmp/omnimon-shots
 shot() { # name cols rows wait args keys...
   local name=$1; shift
   ANSI=1 scripts/tui-shot.sh "$@" > "/tmp/$name.ans"

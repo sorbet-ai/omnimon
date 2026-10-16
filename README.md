@@ -28,13 +28,13 @@ hardware; see [Platforms](#platforms-and-data-sources).
 
 ## Features
 
-- **Overview**: a card per GPU with gradient bars (util, memory, power,
-  temperature, clocks, memory bandwidth, fan, encoder/decoder) and a mirrored
-  history chart (utilization up, memory down). On 8+ GPU boxes the cards
+- **Overview**: a card per GPU with bars (util, memory, power, temperature,
+  clocks, memory bandwidth, fan, encoder/decoder) and history strips for
+  utilization, memory, power and temperature. On 8+ GPU boxes the cards
   collapse to one line each. Borders turn red on spill, thermal throttling,
   power brake, ECC errors or a lost GPU.
-- **Host**: per-core CPU heat strip, memory, swap, network and disk throughput,
-  CPU temperature, load.
+- **Host**: the same layout for the machine: CPU with per-core load, memory,
+  swap, network and disk throughput, CPU temperature, load.
 - **Processes**: GPU memory, memory spilled to system RAM (`SYS-MEM`), SM %,
   enc/dec, CPU, RAM, runtime, user, command. Sort, filter, tag and signal.
   `Enter` opens the process: parent chain, children, exe, cwd, GPU-relevant
@@ -44,8 +44,9 @@ hardware; see [Platforms](#platforms-and-data-sources).
   Real anti-aliased pixel plots in terminals that support images (kitty,
   WezTerm, Ghostty, iTerm2, Windows Terminal, VS Code with
   `terminal.integrated.enableImages`), solid block charts everywhere else.
-  Five color schemes for bars and charts (`L`): rainbow, mono, heat (color
-  follows the value), outline, minimal (grey until something runs hot).
+  Five color schemes for bars and charts (`L`): mono (the default, one
+  color per metric), rainbow, heat (color follows the value), outline,
+  minimal (grey until something runs hot).
 - **NVLink and MIG** (NVIDIA data-center GPUs): links up/down, traffic and
   errors per link, peers (GPU or NVSwitch); MIG partitions with memory, SMs,
   processes (`GPU/instance` in the table) and, on Hopper+, utilization.
@@ -92,7 +93,7 @@ hardware; see [Platforms](#platforms-and-data-sources).
 
 When a workload outgrows VRAM, the driver or runtime puts the overflow in
 system memory, and every access crosses PCIe at a fraction of VRAM
-bandwidth. Nothing crashes; it just gets several times slower. (Windows'
+bandwidth. Nothing crashes; bandwidth-bound work just gets slower. (Windows'
 NVIDIA "sysmem fallback" does this silently; so does a model partly offloaded
 to the CPU.)
 
@@ -182,7 +183,7 @@ omnimon --connect HOST      watch another machine running --serve (read-only)
 omnimon --diagnose          what was detected, and why things are missing
 omnimon --demo 8            8 simulated GPUs
 omnimon --graphics sixel    force a graphics protocol (auto|kitty|sixel|iterm2|off)
-omnimon --look heat         chart colors (rainbow|mono|heat|outline|minimal)
+omnimon --look heat         chart colors (mono|rainbow|heat|outline|minimal)
 omnimon --theme nord        color theme; --no-color for plain output
 ```
 

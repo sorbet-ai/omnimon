@@ -18,8 +18,8 @@ struct Chart<'a> {
     value: String,
     data: &'a Ring,
     grad: Gradient,
-    /// A second series hanging below, auto-scaled together (PCIe rx/tx).
-    mirror: Option<(&'a Ring, Gradient)>,
+    /// A second series in a lane below, auto-scaled together (PCIe rx/tx).
+    second: Option<(&'a Ring, Gradient)>,
 }
 
 pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
@@ -54,7 +54,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
     };
 
     let mut charts = vec![
-        Chart { title: "GPU utilization", value: fmt::pct(sm.util_gpu), data: &h.util, grad: t.util, mirror: None },
+        Chart { title: "GPU utilization", value: fmt::pct(sm.util_gpu), data: &h.util, grad: t.util, second: None },
         Chart {
             title: "Memory",
             value: match (sm.mem_used, sm.mem_total) {
@@ -63,7 +63,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             },
             data: &h.mem,
             grad: t.mem,
-            mirror: None,
+            second: None,
         },
         Chart {
             title: "Power",
@@ -74,9 +74,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             },
             data: &h.power,
             grad: t.power,
-            mirror: None,
+            second: None,
         },
-        Chart { title: "Temperature", value: fmt::opt(sm.temp, "°C"), data: &h.temp, grad: t.temp, mirror: None },
+        Chart { title: "Temperature", value: fmt::opt(sm.temp, "°C"), data: &h.temp, grad: t.temp, second: None },
         Chart {
             title: "SM clock",
             value: match (sm.clock_sm.or(sm.clock_graphics), g.max_clock_sm.or(g.max_clock_graphics)) {
@@ -86,7 +86,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             },
             data: &h.clock,
             grad: t.util,
-            mirror: None,
+            second: None,
         },
         Chart {
             title: "PCIe ▼rx ▲tx",
@@ -96,11 +96,11 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             },
             data: &h.rx,
             grad: t.mem,
-            mirror: Some((&h.tx, t.power)),
+            second: Some((&h.tx, t.power)),
         },
     ];
     if let Some(a) = &sm.activity {
-        charts.push(Chart { title: "Tensor cores", value: fmt::pct(a.tensor), data: &h.tensor, grad: t.util, mirror: None });
+        charts.push(Chart { title: "Tensor cores", value: fmt::pct(a.tensor), data: &h.tensor, grad: t.util, second: None });
         charts.push(Chart {
             title: "Memory bandwidth",
             value: match (a.dram_bw, g.memory_bandwidth) {
@@ -109,7 +109,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             },
             data: &h.dram,
             grad: t.mem,
-            mirror: None,
+            second: None,
         });
     }
 
@@ -134,7 +134,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         let secs = app.store.hist.span(c.data, w).unwrap_or(w as f64 * app.interval.as_secs_f64()) as u64;
         let b = b.title_bottom(Line::from(s(format!(" {} ", fmt::duration(secs)), t.faint)));
         let slot = 100 + (i as u32) * 10 + k as u32;
-        match c.mirror {
+        match c.second {
             Some((m, grad2)) => {
                 let mraw = app.store.hist.tail(m, w);
                 let max = raw.iter().chain(mraw).flatten().copied().fold(1.0f64, f64::max);
