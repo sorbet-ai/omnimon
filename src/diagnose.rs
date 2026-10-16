@@ -121,7 +121,7 @@ pub fn diagnose(info: &GpuInfo, s: &GpuSample, procs: &[&ProcRow], recent: Recen
     {
         add(Severity::Info, "Allocated but idle", format!("{:.0}% of VRAM held, {avg:.1}% average utilization recently", m * 100.0));
     }
-    out.sort_by(|a, b| b.severity.cmp(&a.severity));
+    out.sort_by_key(|f| std::cmp::Reverse(f.severity));
     out
 }
 

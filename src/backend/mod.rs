@@ -13,6 +13,7 @@ pub mod demo;
 pub mod drm_fdinfo;
 #[cfg(target_os = "linux")]
 pub mod intel;
+#[cfg(not(target_os = "macos"))]
 pub mod nvml;
 #[cfg(target_os = "linux")]
 mod sysfs;
