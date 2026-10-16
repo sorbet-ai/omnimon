@@ -170,6 +170,17 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
     metric("host_cpu_utilization_percent", "Host CPU utilization.", "gauge", vec![(String::new(), s.host.cpu as f64)]);
     metric("host_memory_used_bytes", "Host memory in use.", "gauge", vec![(String::new(), s.host.mem_used as f64)]);
     metric("host_memory_total_bytes", "Host memory size.", "gauge", vec![(String::new(), s.host.mem_total as f64)]);
+    let host = |v: Option<u64>| v.map(|v| vec![(String::new(), v as f64)]).unwrap_or_default();
+    metric("host_network_receive_bytes_per_second", "Network receive throughput.", "gauge", host(s.host.net_rx));
+    metric("host_network_transmit_bytes_per_second", "Network transmit throughput.", "gauge", host(s.host.net_tx));
+    metric("host_disk_read_bytes_per_second", "Disk read throughput.", "gauge", host(s.host.disk_read));
+    metric("host_disk_write_bytes_per_second", "Disk write throughput.", "gauge", host(s.host.disk_write));
+    metric(
+        "host_cpu_temperature_celsius",
+        "Hottest CPU sensor.",
+        "gauge",
+        s.host.cpu_temp.map(|v| vec![(String::new(), v as f64)]).unwrap_or_default(),
+    );
     o
 }
 

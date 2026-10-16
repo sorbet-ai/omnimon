@@ -381,6 +381,14 @@ pub struct HostSample {
     pub swap_total: u64,
     pub load: Option<[f64; 3]>,
     pub uptime: u64,
+    /// Bytes/s across non-loopback interfaces.
+    pub net_rx: Option<u64>,
+    pub net_tx: Option<u64>,
+    /// Bytes/s across physical disks.
+    pub disk_read: Option<u64>,
+    pub disk_write: Option<u64>,
+    /// Hottest CPU package/core sensor.
+    pub cpu_temp: Option<f32>,
 }
 
 /// Everything known at startup.

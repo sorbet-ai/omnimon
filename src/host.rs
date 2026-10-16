@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind, Users};
+use sysinfo::{Components, Disks, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind, Users};
 
 use crate::model::{GpuProcess, HostInfo, HostSample, PidMapping, PidScope, ProcRow};
 use crate::os::PidResolver;
@@ -14,7 +14,15 @@ pub struct Host {
     /// uid -> user name (users rarely change; refreshed on a miss).
     user_names: HashMap<String, Option<String>>,
     mapper: PidResolver,
+    networks: Networks,
+    disks: Disks,
+    components: Components,
+    last_io: std::time::Instant,
     pub info: HostInfo,
+}
+
+fn is_loopback(name: &str) -> bool {
+    name == "lo" || name.starts_with("lo0") || name.to_lowercase().contains("loopback")
 }
 
 fn detect_container() -> Option<String> {
@@ -73,7 +81,17 @@ impl Host {
             wsl: detect_wsl(),
             container,
         };
-        Host { sys, users: Users::new_with_refreshed_list(), user_names: HashMap::new(), mapper: PidResolver::new(in_container), info }
+        Host {
+            sys,
+            users: Users::new_with_refreshed_list(),
+            user_names: HashMap::new(),
+            mapper: PidResolver::new(in_container),
+            networks: Networks::new_with_refreshed_list(),
+            disks: Disks::new_with_refreshed_list(),
+            components: Components::new_with_refreshed_list(),
+            last_io: std::time::Instant::now(),
+            info,
+        }
     }
 
     pub fn sample(&mut self) -> HostSample {
@@ -85,7 +103,40 @@ impl Host {
             let l = System::load_average();
             Some([l.one, l.five, l.fifteen])
         };
+        // Network and disk counters are deltas since the previous refresh.
+        let dt = self.last_io.elapsed().as_secs_f64().max(0.001);
+        self.last_io = std::time::Instant::now();
+        self.networks.refresh(true);
+        self.disks.refresh(true);
+        self.components.refresh(true);
+        let per_s = |b: u64| Some((b as f64 / dt) as u64);
+        let (rx, tx) = self
+            .networks
+            .iter()
+            .filter(|(name, _)| !is_loopback(name))
+            .fold((0, 0), |(r, t), (_, d)| (r + d.received(), t + d.transmitted()));
+        // Partitions of one device report the same counters; count each device once.
+        let mut seen = std::collections::HashSet::new();
+        let (rd, wr) = self.disks.iter().filter(|d| seen.insert(d.name().to_os_string())).fold((0, 0), |(r, w), d| {
+            let u = d.usage();
+            (r + u.read_bytes, w + u.written_bytes)
+        });
+        let cpu_temp = self
+            .components
+            .iter()
+            .filter(|c| {
+                let l = c.label().to_lowercase();
+                ["cpu", "package", "tctl", "tdie", "core", "k10temp", "coretemp"].iter().any(|k| l.contains(k))
+            })
+            .filter_map(|c| c.temperature())
+            .filter(|t| t.is_finite() && *t > 0.0 && *t < 150.0)
+            .reduce(f32::max);
         HostSample {
+            net_rx: per_s(rx),
+            net_tx: per_s(tx),
+            disk_read: per_s(rd),
+            disk_write: per_s(wr),
+            cpu_temp,
             cpu: self.sys.global_cpu_usage(),
             per_core: self.sys.cpus().iter().map(|c| c.cpu_usage()).collect(),
             mem_used: self.sys.used_memory(),
@@ -229,8 +280,30 @@ pub struct ProcDetails {
 
 /// Prefixes of environment variables that steer GPU work.
 const GPU_ENV: &[&str] = &[
-    "CUDA_", "NVIDIA_", "NCCL_", "HIP_", "ROCR_", "ROCM_", "HSA_", "GPU_", "ONEAPI_", "ZE_", "SYCL_", "PYTORCH_", "TORCH_", "TF_",
-    "XLA_", "JAX_", "OMP_NUM_THREADS", "LD_LIBRARY_PATH", "LD_PRELOAD", "VK_", "MESA_", "DXVK_", "MTL_", "METAL_",
+    "CUDA_",
+    "NVIDIA_",
+    "NCCL_",
+    "HIP_",
+    "ROCR_",
+    "ROCM_",
+    "HSA_",
+    "GPU_",
+    "ONEAPI_",
+    "ZE_",
+    "SYCL_",
+    "PYTORCH_",
+    "TORCH_",
+    "TF_",
+    "XLA_",
+    "JAX_",
+    "OMP_NUM_THREADS",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "VK_",
+    "MESA_",
+    "DXVK_",
+    "MTL_",
+    "METAL_",
 ];
 
 pub fn is_gpu_env(key: &str) -> bool {
@@ -260,8 +333,12 @@ pub fn process_details(pid: u32) -> Option<ProcDetails> {
     }
     ancestors.reverse();
 
-    let mut children: Vec<(u32, String)> =
-        sys.processes().values().filter(|c| c.parent() == Some(me) && c.thread_kind().is_none()).map(|c| (c.pid().as_u32(), name(c))).collect();
+    let mut children: Vec<(u32, String)> = sys
+        .processes()
+        .values()
+        .filter(|c| c.parent() == Some(me) && c.thread_kind().is_none())
+        .map(|c| (c.pid().as_u32(), name(c)))
+        .collect();
     children.sort();
 
     let mut env: Vec<(String, String)> = p

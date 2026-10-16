@@ -107,7 +107,17 @@ pub(super) fn process(f: &mut Frame, app: &App) {
             s(format!(" {} ", p.name), t.title).bold(),
             s(format!("pid {} · gpu {} ", p.local_pid.unwrap_or(p.pid()), p.gpu), t.dim),
         ]))
-        .title_bottom(Line::from(vec![s(" e ", t.accent).bold(), s("environment  ", t.dim), s("K ", t.accent).bold(), s("kill  ", t.dim), s("esc ", t.accent).bold(), s("close ", t.dim)]).right_aligned());
+        .title_bottom(
+            Line::from(vec![
+                s(" e ", t.accent).bold(),
+                s("environment  ", t.dim),
+                s("K ", t.accent).bold(),
+                s("kill  ", t.dim),
+                s("esc ", t.accent).bold(),
+                s("close ", t.dim),
+            ])
+            .right_aligned(),
+        );
     let inner = b.inner(r).inner(Margin { horizontal: 1, vertical: 0 });
     f.render_widget(b, r);
     let w = inner.width as usize;

@@ -48,6 +48,10 @@ pub struct ProcHist {
 pub struct History {
     pub gpus: Vec<GpuHist>,
     pub cpu: Ring,
+    /// Bytes/s.
+    pub net_rx: Ring,
+    pub net_tx: Ring,
+    pub disk: Ring,
     pub procs: HashMap<(usize, u32), ProcHist>,
 }
 
@@ -71,6 +75,12 @@ impl History {
             h.tx.push(g.pcie_tx.map(|v| v as f64));
         }
         self.cpu.push(Some(s.host.cpu as f64 / 100.0));
+        self.net_rx.push(s.host.net_rx.map(|v| v as f64));
+        self.net_tx.push(s.host.net_tx.map(|v| v as f64));
+        self.disk.push(match (s.host.disk_read, s.host.disk_write) {
+            (Some(r), Some(w)) => Some((r + w) as f64),
+            _ => None,
+        });
         for p in &s.processes {
             let h = self.procs.entry(p.key()).or_default();
             h.mem.push(p.usage.gpu_mem.map(|v| v as f64));

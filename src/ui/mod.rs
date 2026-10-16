@@ -214,6 +214,9 @@ struct App {
     me: Option<String>,
     gfx: gfx::Gfx,
     chart_style: ChartStyle,
+    /// The style to persist: only an explicit choice (`G`), never a fallback
+    /// forced by the current terminal.
+    saved_chart_style: Option<ChartStyle>,
     /// Bumped on every new snapshot; keys the chart image cache.
     version: u64,
     events: std::collections::VecDeque<crate::events::Event>,
@@ -255,6 +258,7 @@ impl App {
             me: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok(),
             gfx,
             chart_style,
+            saved_chart_style: cfg.chart_style,
             version: 0,
             events: Default::default(),
             events_scroll: 0,
@@ -551,7 +555,12 @@ impl App {
             .collect();
         let i = order.iter().position(|s| *s == self.chart_style).unwrap_or(0);
         self.chart_style = order[(i + 1) % order.len()];
-        let extra = if self.chart_style == ChartStyle::Pixels { format!(" ({})", self.gfx.protocol_name()) } else { String::new() };
+        self.saved_chart_style = Some(self.chart_style);
+        let extra = if self.chart_style == ChartStyle::Pixels {
+            format!(" ({}) · press G again if charts stay empty", self.gfx.protocol_name())
+        } else {
+            String::new()
+        };
         self.toast(format!("charts: {}{extra}", self.chart_style.label()), false);
     }
 
@@ -605,7 +614,7 @@ impl App {
             sort: Some(self.spec.sort),
             sort_desc: Some(self.spec.desc),
             full_cmd: Some(self.full_cmd),
-            chart_style: Some(self.chart_style),
+            chart_style: self.saved_chart_style,
         });
     }
 }
@@ -622,6 +631,9 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, opts: &Ui
         forced => gfx::Gfx::detect(Some(forced)),
     };
     let mut app = App::new(info, interval, opts, &cfg, gfx);
+    if app.chart_ctx().pixels() {
+        app.toast(format!("charts: pixels ({}) · press G if they stay empty", app.gfx.protocol_name()), false);
+    }
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = (|| -> anyhow::Result<()> {
         let mut dirty = true;

@@ -89,7 +89,18 @@ impl Gfx {
             Some("iterm2") => picker.set_protocol_type(ProtocolType::Iterm2),
             _ => {}
         }
-        if picker.protocol_type() == ProtocolType::Halfblocks {
+        // Trust what the terminal says, not its name: VS Code identifies itself
+        // but only draws images with `terminal.integrated.enableImages`, and
+        // then it answers the probe with sixel support.
+        let reported = picker.capabilities().iter().any(|c| matches!(c, Capability::Kitty | Capability::Sixel));
+        let iterm2_native = matches!(std::env::var("TERM_PROGRAM").as_deref(), Ok("iTerm.app" | "WezTerm"));
+        let usable = match picker.protocol_type() {
+            ProtocolType::Halfblocks => false,
+            ProtocolType::Iterm2 => iterm2_native || force.is_some(),
+            _ => reported || force.is_some(),
+        };
+        if !usable {
+            log::debug!("graphics: no usable protocol (detected {:?}, caps {:?})", picker.protocol_type(), picker.capabilities());
             return Gfx { bg, ..none };
         }
         Gfx { picker: Some(picker), bg, cache: Default::default() }

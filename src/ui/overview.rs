@@ -20,7 +20,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         draw_no_gpus(f, app, area);
         return;
     }
-    let host_h = 4u16;
+    let host_h = 5u16;
     // The process list gets what it needs (within reason); GPU cards grow
     // into the rest, up to a cap, so a lone GPU gets a big chart.
     let want_procs = (app.view.len() as u16 + 4).clamp(7, 18);
@@ -305,6 +305,9 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
     };
     let h = &snap.host;
     title.push(s(format!("· up {} ", fmt::duration(h.uptime)), t.dim));
+    if let Some(c) = h.cpu_temp {
+        title.push(s(format!("· {c:.0}°C "), t.temp.at(((c as f64 - 35.0) / 60.0).clamp(0.0, 1.0))));
+    }
     let mut b = block(t, false).title_top(Line::from(title));
     if let Some(l) = h.load {
         b = b.title_top(Line::from(vec![s(" load ", t.dim), s(format!("{:.2} {:.2} {:.2} ", l[0], l[1], l[2]), t.fg)]).right_aligned());
@@ -358,4 +361,48 @@ fn host_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(s(" SWP", t.dim)), sl);
     f.render_widget(GradBar { frac: frac(h.swap_used, h.swap_total).or(Some(0.0)), grad: t.mem, track: t.track }, sbar);
     f.render_widget(Paragraph::new(s(format!(" {}/{}", fmt::bytes_short(h.swap_used), fmt::bytes_short(h.swap_total)), t.fg)), sval);
+
+    // Network + disk throughput with recent history (auto-scaled sparklines).
+    if inner.height < 3 {
+        return;
+    }
+    let row2 = Rect { y: inner.y + 2, height: 1, ..inner };
+    let [nl, nval, nspark, dl, dval, dspark] = Layout::horizontal([
+        Constraint::Length(4),
+        Constraint::Length(22),
+        Constraint::Length(half.saturating_sub(26).max(4)),
+        Constraint::Length(5),
+        Constraint::Length(22),
+        Constraint::Fill(1),
+    ])
+    .areas(row2);
+    let rate = |v: Option<u64>| v.map(fmt::rate).unwrap_or_else(|| "N/A".into());
+    f.render_widget(Paragraph::new(s("NET", t.dim)), nl);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            s(" ▼", t.accent),
+            s(format!("{:<9}", rate(h.net_rx)), t.fg),
+            s("▲", t.accent2),
+            s(rate(h.net_tx), t.fg),
+        ])),
+        nval,
+    );
+    let scaled = |r: &[Option<f64>]| {
+        let max = r.iter().flatten().copied().fold(1.0f64, f64::max);
+        r.iter().map(|v| v.map(|x| x / max)).collect::<Vec<_>>()
+    };
+    let rx = scaled(app.hist.net_rx.tail(nspark.width as usize));
+    f.render_widget(Spark { data: &rx, grad: t.mem }, nspark);
+    f.render_widget(Paragraph::new(s(" DSK", t.dim)), dl);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            s(" r ", t.dim),
+            s(format!("{:<9}", rate(h.disk_read)), t.fg),
+            s("w ", t.dim),
+            s(rate(h.disk_write), t.fg),
+        ])),
+        dval,
+    );
+    let disk = scaled(app.hist.disk.tail(dspark.width as usize));
+    f.render_widget(Spark { data: &disk, grad: t.power }, Rect { x: dspark.x + 1, width: dspark.width.saturating_sub(1), ..dspark });
 }
