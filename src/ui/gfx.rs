@@ -20,7 +20,7 @@ use tiny_skia::{
     FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, PathBuilder, Pixmap, Point, SpreadMode, Stroke, Transform,
 };
 
-use super::theme::Gradient;
+use super::theme::{Gradient, Look, look, paint};
 use super::widgets::{AreaChart, BlockChart};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -132,7 +132,7 @@ impl Gfx {
     /// (stable across frames); `version` changes whenever the data does.
     fn draw_pixels(&self, f: &mut Frame, area: Rect, slot: u32, ctx: &ChartCtx, series: &[Series]) {
         let Some(picker) = &self.picker else { return };
-        let key = (ctx.version, area, ctx.theme);
+        let key = (ctx.version, area, ctx.theme * 8 + look() as usize);
         let mut cache = self.cache.borrow_mut();
         let fresh = cache.get(&slot).is_some_and(|c| c.key == key);
         if !fresh {
@@ -280,6 +280,43 @@ fn shader(grad: Gradient, y_low: f32, y_high: f32, alpha: [f32; 3]) -> Option<ti
     )
 }
 
+/// Paint for one run of a series under the current look: `alpha` runs from
+/// the baseline to the top for vertical (scale-position) coloring.
+fn run_shader(grad: Gradient, run: &[(f32, f32)], y0: f32, y1: f32, alpha: [f32; 3], line: bool) -> Option<tiny_skia::Shader<'static>> {
+    let value = |y: f32| ((y - y0) / (y1 - y0)).clamp(0.0, 1.0) as f64;
+    let flat = |c: Color, a: f32| Some(tiny_skia::Shader::SolidColor(sk(c, a)));
+    match look() {
+        Look::Rainbow => shader(grad, y0, y1, alpha),
+        Look::Mono => {
+            let c = grad.0[0];
+            if line {
+                flat(c, alpha[2])
+            } else {
+                LinearGradient::new(
+                    Point::from_xy(0.0, y0),
+                    Point::from_xy(0.0, y1),
+                    vec![GradientStop::new(0.0, sk(c, alpha[0] * 0.6)), GradientStop::new(1.0, sk(c, alpha[2] * 0.6))],
+                    SpreadMode::Pad,
+                    Transform::identity(),
+                )
+            }
+        }
+        Look::Outline => flat(grad.0[0], if line { alpha[2] } else { 0.10 }),
+        // Color follows the value along the line: a horizontal gradient with
+        // a stop per sample.
+        Look::Heat | Look::Minimal => {
+            let a = if line { alpha[2] } else { 0.28 };
+            let (x0, x1) = (run[0].0, run[run.len() - 1].0);
+            if run.len() < 2 || x1 - x0 < 1.0 {
+                return flat(paint(grad, value(run[0].1), value(run[0].1), true), a);
+            }
+            let stops =
+                run.iter().map(|&(x, y)| GradientStop::new((x - x0) / (x1 - x0), sk(paint(grad, value(y), value(y), true), a))).collect();
+            LinearGradient::new(Point::from_xy(x0, 0.0), Point::from_xy(x1, 0.0), stops, SpreadMode::Pad, Transform::identity())
+        }
+    }
+}
+
 /// Render series into an RGBA image. `scale` ~ 1.0 at an 18px-tall font.
 pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaImage {
     let mut pm = Pixmap::new(w, h).expect("non-zero size");
@@ -352,7 +389,7 @@ pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaI
             curve(&mut pb);
             pb.line_to(run[run.len() - 1].0, y0);
             pb.close();
-            if let (Some(path), Some(sh)) = (pb.finish(), shader(s.grad, y0, y1, [0.10, 0.30, 0.55])) {
+            if let (Some(path), Some(sh)) = (pb.finish(), run_shader(s.grad, run, y0, y1, [0.10, 0.30, 0.55], false)) {
                 let paint = Paint { shader: sh, anti_alias: true, ..Default::default() };
                 pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
             }
@@ -363,7 +400,7 @@ pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaI
             curve(&mut pb);
             if let Some(path) = pb.finish() {
                 for (width, alpha) in [(5.0 * scale, [0.10, 0.14, 0.18]), (1.7 * scale, [0.95, 1.0, 1.0])] {
-                    if let Some(sh) = shader(s.grad, y0, y1, alpha) {
+                    if let Some(sh) = run_shader(s.grad, run, y0, y1, alpha, true) {
                         let paint = Paint { shader: sh, anti_alias: true, ..Default::default() };
                         let stroke = Stroke { width, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
                         pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
@@ -375,7 +412,7 @@ pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaI
         // Highlight the newest point.
         if let Some(&(x, y)) = runs.last().and_then(|r| r.last()) {
             let t = ((y - y0) / (y1 - y0)).clamp(0.0, 1.0) as f64;
-            let col = s.grad.at(t);
+            let col = paint(s.grad, t, t, true);
             for (r, a) in [(5.5 * scale, 0.18), (2.6 * scale, 1.0)] {
                 if let Some(c) = PathBuilder::from_circle(x, y, r) {
                     let mut p = Paint::default();
@@ -444,5 +481,17 @@ mod tests {
         let _ = img.save(dir.join("chart-mirrored.png"));
         let img = render(600, 300, 1.0, &[Series { data: &util, grad: t.power, down: false }], bg);
         let _ = img.save(dir.join("chart-single.png"));
+        for l in Look::ALL {
+            super::super::theme::set_look(l, bg);
+            let img = render(
+                900,
+                220,
+                1.0,
+                &[Series { data: &util, grad: t.util, down: false }, Series { data: &mem, grad: t.mem, down: true }],
+                bg,
+            );
+            let _ = img.save(dir.join(format!("chart-look-{}.png", l.name())));
+        }
+        super::super::theme::set_look(Look::Rainbow, bg);
     }
 }

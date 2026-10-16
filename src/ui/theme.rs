@@ -1,6 +1,8 @@
 //! Themes. Everything is defined in truecolor; on terminals without it the
 //! finished frame is quantized to the xterm-256 palette in one pass.
 
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 
@@ -28,6 +30,90 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
             } else {
                 b
             }
+        }
+    }
+}
+
+/// How bars and charts use color, independent of the theme's palette.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Look {
+    /// Color runs along the scale (green at the bottom, red at the top).
+    #[default]
+    Rainbow,
+    /// One calm color per metric, a brighter top edge.
+    Mono,
+    /// Each column / bar takes the color of its own value: calm when low,
+    /// hot only when high.
+    Heat,
+    /// A bright line over a faint fill.
+    Outline,
+    /// Grey until a value gets high; color means "look here".
+    Minimal,
+}
+
+impl Look {
+    pub const ALL: [Look; 5] = [Look::Rainbow, Look::Mono, Look::Heat, Look::Outline, Look::Minimal];
+    pub fn name(self) -> &'static str {
+        match self {
+            Look::Rainbow => "rainbow",
+            Look::Mono => "mono",
+            Look::Heat => "heat",
+            Look::Outline => "outline",
+            Look::Minimal => "minimal",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Look> {
+        Look::ALL.into_iter().find(|l| l.name() == s)
+    }
+}
+
+// The look and the chart background are UI-wide settings the widgets read
+// while drawing (set once per frame by the app).
+static LOOK: AtomicU8 = AtomicU8::new(0);
+static BG: AtomicU32 = AtomicU32::new(0x1a1b26);
+
+pub fn set_look(look: Look, bg: Color) {
+    LOOK.store(Look::ALL.iter().position(|l| *l == look).unwrap_or(0) as u8, Ordering::Relaxed);
+    if let Color::Rgb(r, g, b) = bg {
+        BG.store(u32::from_be_bytes([0, r, g, b]), Ordering::Relaxed);
+    }
+}
+
+pub fn look() -> Look {
+    Look::ALL.get(LOOK.load(Ordering::Relaxed) as usize).copied().unwrap_or_default()
+}
+
+pub fn bg() -> Color {
+    let [_, r, g, b] = BG.load(Ordering::Relaxed).to_be_bytes();
+    Color::Rgb(r, g, b)
+}
+
+/// Neutral grey for the minimal look.
+fn grey() -> Color {
+    lerp(bg(), Color::Rgb(0xc0, 0xc4, 0xd0), 0.42)
+}
+
+/// Color of one filled bar/chart cell under the current look. `pos`: where
+/// the cell sits on the scale (0 = baseline, 1 = full); `value`: the value
+/// the bar or column shows; `edge`: the cell is the top of its column (or
+/// the end of a bar).
+pub fn paint(g: Gradient, pos: f64, value: f64, edge: bool) -> Color {
+    match look() {
+        Look::Rainbow => g.at(pos),
+        Look::Mono => {
+            let c = g.0[0];
+            if edge { c } else { lerp(c, bg(), 0.25) }
+        }
+        // Calm (the low color) up to ~40%, hottest at 100%.
+        Look::Heat => g.at(((value - 0.4) / 0.6).clamp(0.0, 1.0)),
+        Look::Outline => {
+            let c = g.0[0];
+            if edge { c } else { lerp(c, bg(), 0.78) }
+        }
+        Look::Minimal => {
+            let hot = ((value - 0.75) / 0.25).clamp(0.0, 1.0);
+            lerp(grey(), g.0[2], hot)
         }
     }
 }

@@ -69,6 +69,10 @@ struct Cli {
     #[arg(long, value_name = "ADDR", conflicts_with_all = ["serve", "demo"])]
     connect: Option<String>,
 
+    /// Chart colors: rainbow, mono, heat, outline or minimal (L cycles).
+    #[arg(long, value_name = "LOOK")]
+    look: Option<String>,
+
     /// Pixel graphics for charts: auto-detect, force a protocol, or off.
     #[arg(long, value_name = "auto|kitty|sixel|iterm2|off", default_value = "auto")]
     graphics: String,
@@ -97,7 +101,13 @@ fn main() -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        let opts = ui::UiOptions { theme: cli.theme.clone(), readonly: true, graphics: cli.graphics.clone(), remote: Some(addr.clone()) };
+        let opts = ui::UiOptions {
+            theme: cli.theme.clone(),
+            readonly: true,
+            graphics: cli.graphics.clone(),
+            remote: Some(addr.clone()),
+            look: cli.look.clone(),
+        };
         return ui::run(source, info, interval, &opts, cfg);
     }
 
@@ -130,6 +140,12 @@ fn main() -> anyhow::Result<()> {
         return serve::run(collector, info, interval, addr, &cfg);
     }
 
-    let opts = ui::UiOptions { theme: cli.theme.clone(), readonly: cli.readonly, graphics: cli.graphics.clone(), remote: None };
+    let opts = ui::UiOptions {
+        theme: cli.theme.clone(),
+        readonly: cli.readonly,
+        graphics: cli.graphics.clone(),
+        remote: None,
+        look: cli.look.clone(),
+    };
     ui::run(collector, info, interval, &opts, cfg)
 }

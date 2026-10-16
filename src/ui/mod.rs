@@ -21,6 +21,7 @@ mod widgets;
 pub use gfx::ChartStyle;
 pub use input::Action;
 pub use procview::SortKey;
+pub use theme::Look;
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -46,6 +47,8 @@ pub struct UiOptions {
     pub graphics: String,
     /// Watching another machine (`--connect`): its address.
     pub remote: Option<String>,
+    /// Chart colors (`--look`).
+    pub look: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -145,6 +148,7 @@ struct App {
     popup: Option<Popup>,
     toast: Option<(String, Instant, bool)>,
     theme: usize,
+    look: Look,
     truecolor: bool,
     readonly: bool,
     paused: bool,
@@ -184,6 +188,7 @@ impl App {
             popup: None,
             toast: None,
             theme,
+            look: opts.look.as_deref().and_then(Look::parse).or(cfg.look).unwrap_or_default(),
             truecolor: theme::truecolor_supported(),
             readonly: opts.readonly,
             paused: false,
@@ -447,6 +452,11 @@ impl App {
             }
             Action::Kill => self.open_kill(),
             Action::ChartStyle => self.cycle_chart_style(),
+            Action::Look => {
+                let i = Look::ALL.iter().position(|l| *l == self.look).unwrap_or(0);
+                self.look = Look::ALL[(i + 1) % Look::ALL.len()];
+                self.toast(format!("chart colors: {}", self.look.name()), false);
+            }
             Action::Theme => {
                 self.theme = (self.theme + 1) % theme::THEMES.len();
                 self.toast(format!("theme: {}", self.theme().name), false);
@@ -521,6 +531,11 @@ impl App {
                     self.hidden.remove(&panel);
                 }
                 Ok(format!("{} {}", if hide { "hid" } else { "showing" }, panel.name()))
+            }
+            "look" | "colors" => {
+                self.look = Look::parse(arg)
+                    .ok_or_else(|| format!("looks: {}", Look::ALL.iter().map(|l| l.name()).collect::<Vec<_>>().join(", ")))?;
+                Ok(format!("chart colors: {arg}"))
             }
             "charts" => {
                 self.chart_style = match arg {
@@ -713,6 +728,7 @@ impl App {
             c.sort_desc = Some(self.view.spec.desc);
             c.full_cmd = Some(self.view.full_cmd);
             c.chart_style = self.saved_chart_style;
+            c.look = Some(self.look);
             c.hidden = Panel::ALL.into_iter().filter(|p| self.hidden.contains(p)).collect();
         });
     }
@@ -768,6 +784,7 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
             }
             if dirty {
                 let mut hit = Hit::default();
+                theme::set_look(app.look, app.chart_ctx().bg);
                 terminal.draw(|f| {
                     hit = draw::draw(f, &app);
                     if !app.truecolor {

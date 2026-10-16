@@ -16,6 +16,8 @@ pub struct Config {
     pub sort_desc: Option<bool>,
     pub full_cmd: Option<bool>,
     pub chart_style: Option<crate::ui::ChartStyle>,
+    /// How charts and bars use color: rainbow, mono, heat, outline, minimal.
+    pub look: Option<crate::ui::Look>,
     /// Overview panels to hide: "gpus", "host", "procs".
     pub hidden: Vec<crate::ui::Panel>,
     /// Key overrides per action, e.g. {"kill": ["K", "f9"]}. Hand-edited;

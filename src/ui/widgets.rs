@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Widget;
 
-use super::theme::Gradient;
+use super::theme::{Gradient, Look, look, paint};
 
 const EIGHTHS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 
@@ -30,12 +30,21 @@ impl Widget for GradBar {
             }
             return;
         };
-        let filled = frac.clamp(0.0, 1.0) * w as f64;
+        let frac = frac.clamp(0.0, 1.0);
+        let filled = frac * w as f64;
+        let last = (filled.ceil() as usize).saturating_sub(1);
+        let thin = matches!(look(), Look::Outline | Look::Minimal);
         for i in 0..w {
             let pos = (i as f64 + 0.5) / w as f64;
-            let col = self.grad.at(pos);
+            let col = paint(self.grad, pos, frac, i == last);
             let cell = &mut buf[(area.x + i as u16, y)];
             let amount = (filled - i as f64).clamp(0.0, 1.0);
+            if thin {
+                // A line rather than a slab: heavy where filled, light track after.
+                let (ch, fg) = if amount > 0.0 { ('━', paint(self.grad, pos, frac, true)) } else { ('─', self.track) };
+                cell.set_char(ch).set_style(Style::new().fg(fg));
+                continue;
+            }
             if amount >= 1.0 {
                 cell.set_char('█').set_style(Style::new().fg(col).bg(self.track));
             } else if amount > 0.0 {
@@ -101,7 +110,9 @@ impl Widget for AreaChart<'_> {
                 let bits = lt[..ld].iter().chain(&rt[..rd]).fold(0u8, |b, d| b | d);
                 let ch = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
                 let y = if self.inverted { area.y + row as u16 } else { area.y + (h - 1 - row) as u16 };
-                let col = self.grad.at((row as f64 + 0.5) / h as f64);
+                let v = l.unwrap_or(0.0).max(r.unwrap_or(0.0));
+                let top = ((v.clamp(0.0, 1.0) * total_dots).ceil() as usize).div_ceil(4).max(1) - 1;
+                let col = paint(self.grad, (row as f64 + 0.5) / h as f64, v, row == top);
                 buf[(area.x + cx as u16, y)].set_char(ch).set_fg(col);
             }
         }
@@ -127,7 +138,7 @@ impl Widget for Spark<'_> {
             let Some(v) = self.data[n - 1 - from_right] else { continue };
             let v = v.clamp(0.0, 1.0);
             let idx = ((v * 8.0).round() as usize).max(if v > 0.004 { 1 } else { 0 });
-            buf[(area.x + i as u16, area.y)].set_char(BLK[idx]).set_fg(self.grad.at(v));
+            buf[(area.x + i as u16, area.y)].set_char(BLK[idx]).set_fg(paint(self.grad, v, v, true));
         }
     }
 }
@@ -158,12 +169,13 @@ impl Widget for BlockChart<'_> {
             if eighths == 0 && v > 0.004 {
                 eighths = 1;
             }
+            let top = eighths.div_ceil(8).saturating_sub(1);
             for row in 0..h {
                 let fill = eighths.saturating_sub(row * 8).min(8);
                 if fill == 0 {
                     break;
                 }
-                let col = self.grad.at((row as f64 + 0.5) / h as f64);
+                let col = paint(self.grad, (row as f64 + 0.5) / h as f64, v, row == top);
                 let x = area.x + cx as u16;
                 if self.inverted {
                     // Color the top `fill` eighths: a lower block of the
