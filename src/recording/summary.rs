@@ -319,6 +319,7 @@ fn change(a: Option<f64>, b: Option<f64>, u: Unit) -> String {
     match u {
         Unit::Pct => format!("{} pts", whole(d)),
         Unit::Celsius => format!("{}°C", whole(d)),
+        Unit::Secs if d.abs() < 0.5 => "0".into(),
         Unit::Secs => format!("{}{}", if d < 0.0 { "-" } else { "+" }, crate::fmt::duration(d.abs().round() as u64)),
         _ if a.abs() > 1e-9 => format!("{}%", whole(d / a * 100.0)),
         _ => String::new(),
