@@ -90,7 +90,12 @@ hardware; see [Platforms](#platforms-and-data-sources).
   processes: each file holds a minute-by-minute full snapshot and only what
   changed in between, gzip-compressed (`.rec` files are valid gzip, of JSON
   lines). The UI and a recorder can run together: one writes, the other
-  takes over when it stops.
+  takes over when it stops. To record from login: on Windows
+  `scripts/recorder-windows.ps1` (a logon task, no window, no admin); on
+  Linux a systemd user service, `ExecStart=/usr/local/bin/omnimon --record`
+  in `~/.config/systemd/user/omnimon-recorder.service` with
+  `WantedBy=default.target`, then `systemctl --user enable --now
+  omnimon-recorder`.
 - **Tuning**: `w` sets the selected GPU's power limit (needs admin/root).
 - **Command palette** (`:`): `theme nord`, `sort cpu`, `filter gpu:0 spill`,
   `hide host`, `show procs`, `procs all`, `charts blocks`, `interval 2`, `gpu 1`,

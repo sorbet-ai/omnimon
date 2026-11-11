@@ -41,8 +41,10 @@ pub(super) fn help(f: &mut Frame, app: &App) {
         if app.popup_chart_ctx().pixels() { format!("pixels ({})", app.gfx.protocol_name()) } else { app.chart_style.label().to_string() };
     let colors = if app.truecolor { "truecolor" } else { "256 colors" };
     lines.push(Line::from(s(format!("{APP_NAME} {APP_VERSION} · theme {} · {colors} · charts {charts}", t.name), t.faint)).centered());
-    if let Some(d) = app.store.recording_to() {
-        lines.push(Line::from(s(format!("recording to {}", fmt::truncate(&d.display().to_string(), 70)), t.faint)).centered());
+    if let Some((d, mine)) = app.store.recording_to() {
+        let d = fmt::truncate(&d.display().to_string(), 64);
+        let text = if mine { format!("recording to {d}") } else { format!("{d} is recorded by another {APP_NAME} process") };
+        lines.push(Line::from(s(text, t.faint)).centered());
     }
     let r = centered(f.area(), 84, lines.len() as u16 + 2);
     f.render_widget(Clear, r);

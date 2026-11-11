@@ -63,10 +63,10 @@ impl Store {
         st
     }
 
-    /// Where this session records, while it does (another process may hold
-    /// the folder).
-    pub fn recording_to(&self) -> Option<&std::path::Path> {
-        self.recorder.as_ref().filter(|r| r.writing()).map(|r| r.dir())
+    /// The recordings folder, and whether this session is the one writing
+    /// it (otherwise another process, e.g. a background recorder, is).
+    pub fn recording_to(&self) -> Option<(&std::path::Path, bool)> {
+        self.recorder.as_ref().map(|r| (r.dir(), r.writing()))
     }
 
     /// The snapshot on screen.
