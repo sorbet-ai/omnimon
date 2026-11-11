@@ -199,7 +199,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let t = app.theme();
     if let Some(line) = &app.cmd_edit {
-        let hint = "theme · sort · filter · hide/show gpus|host|procs · charts · interval · gpu · view · quit";
+        let hint = "theme · sort · filter · procs all|gpu · hide/show gpus|host|procs · charts · interval · gpu · view · quit";
         f.render_widget(Paragraph::new(Line::from(vec![s(" :", t.accent).bold(), s(line.as_str(), t.fg), s("▏", t.accent)])), area);
         f.render_widget(Paragraph::new(Line::from(s(format!("{hint} "), t.faint)).right_aligned()), area);
         return;
@@ -214,6 +214,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             (A::SortNext, "sort"),
             (A::Filter, "filter"),
             (A::GpuOnly, "this gpu"),
+            (A::AllProcs, "all procs"),
             (A::ProcessDetails, "details"),
             (A::Kill, "kill"),
             (A::Theme, "theme"),

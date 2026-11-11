@@ -95,7 +95,14 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     let b = block(t, true)
         .title_top(Line::from(vec![
             s(format!(" {} ", p.name), t.title).bold(),
-            s(format!("pid {} · gpu {} ", p.local_pid.unwrap_or(p.pid()), p.gpu), t.dim),
+            s(
+                if p.on_gpu() {
+                    format!("pid {} · gpu {} ", p.local_pid.unwrap_or(p.pid()), p.gpu)
+                } else {
+                    format!("pid {} · no GPU ", p.local_pid.unwrap_or(p.pid()))
+                },
+                t.dim,
+            ),
         ]))
         .title_bottom(
             Line::from(vec![
@@ -120,6 +127,7 @@ pub(super) fn process(f: &mut Frame, app: &App) {
     };
     let kv = |k: &str, v: String| Line::from(vec![s(format!("{k:<10}"), t.dim), s(fmt::truncate(&v, w.saturating_sub(10)), t.fg)]);
     let kind = match u.kind {
+        _ if !p.on_gpu() => "CPU only (no GPU use)",
         ProcKind::Compute => "compute",
         ProcKind::Graphics => "graphics",
         ProcKind::Both => "compute + graphics",
@@ -132,7 +140,9 @@ pub(super) fn process(f: &mut Frame, app: &App) {
         let cost = app.price_per_kwh.map(|pr| format!(" · ≈{:.3}", h.energy / 3.6e6 * pr)).unwrap_or_default();
         lines.push(kv("energy", format!("≈{:.1} Wh while watched (share of GPU power by SM use){cost}", h.energy / 3600.0)));
     }
-    lines.push(kv("gpu mem", u.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into())));
+    if p.on_gpu() {
+        lines.push(kv("gpu mem", u.gpu_mem.map(fmt::bytes).unwrap_or_else(|| "N/A".into())));
+    }
     if let Some(sh) = u.gpu_mem_shared {
         lines.push(if p.spilling {
             Line::from(vec![
@@ -143,10 +153,18 @@ pub(super) fn process(f: &mut Frame, app: &App) {
             kv("sys mem", fmt::bytes(sh))
         });
     }
-    lines.push(kv(
-        "gpu util",
-        format!("sm {} · mem {} · enc {} · dec {}", fmt::pct(u.sm_util), fmt::pct(u.mem_util), fmt::pct(u.enc_util), fmt::pct(u.dec_util)),
-    ));
+    if p.on_gpu() {
+        lines.push(kv(
+            "gpu util",
+            format!(
+                "sm {} · mem {} · enc {} · dec {}",
+                fmt::pct(u.sm_util),
+                fmt::pct(u.mem_util),
+                fmt::pct(u.enc_util),
+                fmt::pct(u.dec_util)
+            ),
+        ));
+    }
     lines.push(kv(
         "host",
         format!(

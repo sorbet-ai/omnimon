@@ -28,10 +28,23 @@ pub struct Store {
     pub version: u64,
 }
 
+/// Host (CPU-only) processes kept per past snapshot: the busiest few that
+/// are actually doing something, with short command lines. The live view has
+/// the full list; this keeps the rewind buffer and the history file small.
+const HOST_PROCS_KEEP: usize = 8;
+const HOST_PROC_MIN_CPU: f32 = 1.0;
+const HOST_CMDLINE_KEEP: usize = 96;
+
 fn trimmed(s: &Snapshot) -> Snapshot {
     let mut s = s.clone();
+    s.host_processes.retain(|p| p.cpu.unwrap_or(0.0) >= HOST_PROC_MIN_CPU);
+    s.host_processes.sort_by(|a, b| b.cpu.unwrap_or(0.0).total_cmp(&a.cpu.unwrap_or(0.0)));
+    s.host_processes.truncate(HOST_PROCS_KEEP);
     for p in &mut s.processes {
         p.cmdline.truncate(p.cmdline.floor_char_boundary(CMDLINE_KEEP));
+    }
+    for p in &mut s.host_processes {
+        p.cmdline.truncate(p.cmdline.floor_char_boundary(HOST_CMDLINE_KEEP));
     }
     s
 }
@@ -129,5 +142,27 @@ mod tests {
         assert_eq!(st.current().unwrap().timestamp, 1.0);
         st.set_rewind(0);
         assert_eq!(st.current().unwrap().timestamp, 502.0);
+    }
+
+    #[test]
+    fn past_snapshots_keep_only_busy_host_processes() {
+        use crate::model::{GpuProcess, NO_GPU, ProcRow};
+        let host = |pid: u32, cpu: f32| ProcRow {
+            gpu: NO_GPU,
+            usage: GpuProcess { pid, ..Default::default() },
+            cpu: Some(cpu),
+            cmdline: "x".repeat(500),
+            ..Default::default()
+        };
+        let mut s = snap(0.0, 0.0);
+        s.host_processes = (0..20).map(|i| host(i, i as f32)).collect();
+        let t = trimmed(&s);
+        let kept: Vec<u32> = t.host_processes.iter().map(|p| p.pid()).collect();
+        assert_eq!(kept, [19, 18, 17, 16, 15, 14, 13, 12], "busiest first, capped");
+        assert!(t.host_processes.iter().all(|p| p.cmdline.len() == HOST_CMDLINE_KEEP));
+
+        s.host_processes = vec![host(1, 0.2), host(2, 0.0)];
+        assert!(trimmed(&s).host_processes.is_empty(), "idle processes aren't recorded");
+        assert_eq!(s.host_processes.len(), 2, "the live snapshot is untouched");
     }
 }

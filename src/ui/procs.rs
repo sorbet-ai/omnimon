@@ -100,6 +100,7 @@ fn cell<'a>(col: Col, p: &ProcRow, c: &Ctx) -> Cell<'a> {
     let dash = || rcell("-".into(), t.faint);
     match col {
         // "2/7": GPU 2, MIG instance 7.
+        Col::Gpu if !p.on_gpu() => dash(),
         Col::Gpu => rcell(p.usage.gpu_instance.map(|gi| format!("{}/{gi}", p.gpu)).unwrap_or_else(|| p.gpu.to_string()), t.accent),
         Col::Pid => {
             let (txt, st) = match p.mapping {
@@ -112,6 +113,7 @@ fn cell<'a>(col: Col, p: &ProcRow, c: &Ctx) -> Cell<'a> {
             Cell::from(Line::from(txt).right_aligned()).style(st)
         }
         Col::User => Cell::from(fmt::truncate(p.user.as_deref().unwrap_or("-").rsplit('\\').next().unwrap_or("-"), 10)),
+        Col::Kind if !p.on_gpu() => Cell::from("cpu").style(Style::new().fg(t.faint)),
         Col::Kind => Cell::from(u.kind.short()).style(Style::new().fg(match u.kind {
             ProcKind::Compute => t.accent,
             ProcKind::Graphics => t.accent2,
@@ -122,6 +124,7 @@ fn cell<'a>(col: Col, p: &ProcRow, c: &Ctx) -> Cell<'a> {
                 let fg = c.gpu_total.filter(|&tot| tot > 0).map(|tot| t.mem.at(m as f64 / tot as f64 * 2.0)).unwrap_or(t.fg);
                 rcell(fmt::bytes_short(m), fg)
             }
+            None if !p.on_gpu() => dash(),
             None => rcell("N/A".into(), t.faint),
         },
         Col::SysMem => match u.gpu_mem_shared {
@@ -170,6 +173,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
     let mut title = vec![s(" Processes ", t.title).bold(), s(format!("{shown} "), t.dim)];
     if shown != total {
         title.push(s(format!("of {total} "), t.dim));
+    }
+    if app.view.all {
+        title.push(s("· all ", t.accent));
     }
     if app.view.gpu_only {
         title.push(s(format!("· GPU {} only ", app.sel_gpu), t.accent));
@@ -267,12 +273,14 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
         .block(b);
     f.render_stateful_widget(table, area, &mut app.view.table.borrow_mut());
     if empty {
-        let msg = if app.info.host.wsl {
-            "WSL doesn't expose GPU processes (driver limitation); run on Windows to see them"
-        } else if !app.view.spec.filter.is_empty() {
+        let msg = if !app.view.spec.filter.is_empty() {
             "no processes match the filter"
+        } else if app.view.all {
+            "no processes"
+        } else if app.info.host.wsl {
+            "WSL doesn't expose GPU processes (driver limitation); run on Windows to see them"
         } else {
-            "no GPU processes"
+            "no GPU processes (a: show all processes)"
         };
         if inner.height > 2 {
             f.render_widget(Paragraph::new(s(msg, t.faint)).centered(), Rect { y: inner.y + 2, height: 1, ..inner });

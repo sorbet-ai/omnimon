@@ -145,6 +145,9 @@ struct App {
     sel_gpu: usize,
     /// The process list: filter, sort, selection, tags.
     view: procview::ProcView,
+    /// In all-processes mode: GPU rows followed by the host's CPU-only rows
+    /// of the snapshot on screen. Rebuilt by `refresh_view`.
+    merged: Vec<ProcRow>,
     popup: Option<Popup>,
     toast: Option<(String, Instant, bool)>,
     theme: usize,
@@ -188,7 +191,12 @@ impl App {
             store: store::Store::default(),
             tab: Tab::Overview,
             sel_gpu: 0,
-            view: procview::ProcView::new(cfg.sort.unwrap_or(SortKey::GpuMem), cfg.sort_desc, cfg.full_cmd.unwrap_or(false)),
+            view: {
+                let mut v = procview::ProcView::new(cfg.sort.unwrap_or(SortKey::GpuMem), cfg.sort_desc, cfg.full_cmd.unwrap_or(false));
+                v.all = cfg.all_procs.unwrap_or(false);
+                v
+            },
+            merged: Vec::new(),
             popup: None,
             toast: None,
             theme,
@@ -232,7 +240,11 @@ impl App {
         self.snap()?.gpus.get(i)
     }
 
+    /// The rows the process table indexes into.
     fn procs(&self) -> &[ProcRow] {
+        if self.view.all {
+            return &self.merged;
+        }
         self.snap().map(|s| s.processes.as_slice()).unwrap_or(&[])
     }
 
@@ -288,12 +300,19 @@ impl App {
 
     /// Recompute visible rows and keep the selection on the same process.
     fn refresh_view(&mut self) {
-        let procs = self.store.current().map(|s| s.processes.as_slice()).unwrap_or(&[]);
+        let snap = self.store.current();
+        self.merged.clear();
+        if self.view.all
+            && let Some(s) = snap
+        {
+            self.merged.extend(s.processes.iter().chain(&s.host_processes).cloned());
+        }
+        let procs = if self.view.all { &self.merged[..] } else { snap.map(|s| s.processes.as_slice()).unwrap_or(&[]) };
         self.view.refresh(procs, self.sel_gpu);
     }
 
     fn move_sel(&mut self, delta: isize) {
-        let procs = self.store.current().map(|s| s.processes.as_slice()).unwrap_or(&[]);
+        let procs = if self.view.all { &self.merged[..] } else { self.store.current().map(|s| s.processes.as_slice()).unwrap_or(&[]) };
         self.view.move_sel(procs, delta);
     }
 
@@ -462,6 +481,11 @@ impl App {
                 self.view.gpu_only = !self.view.gpu_only;
                 self.refresh_view();
             }
+            Action::AllProcs => {
+                self.view.toggle_all();
+                self.refresh_view();
+                self.toast(if self.view.all { "processes: all (CPU too)" } else { "processes: GPU only" }, false);
+            }
             Action::FullCommand => self.view.full_cmd = !self.view.full_cmd,
             Action::Tag => {
                 if let Some(key) = self.view.sel_key {
@@ -540,6 +564,18 @@ impl App {
                 self.view.spec.filter = rest.join(" ");
                 self.refresh_view();
                 Ok(String::new())
+            }
+            "procs" | "processes" => {
+                let all = match arg {
+                    "all" | "cpu" => true,
+                    "gpu" => false,
+                    _ => return Err("procs all | gpu".into()),
+                };
+                if all != self.view.all {
+                    self.view.toggle_all();
+                    self.refresh_view();
+                }
+                Ok(format!("processes: {}", if all { "all" } else { "GPU only" }))
             }
             "clear" => {
                 self.view.spec.filter.clear();
@@ -762,6 +798,7 @@ impl App {
             c.sort = Some(self.view.spec.sort);
             c.sort_desc = Some(self.view.spec.desc);
             c.full_cmd = Some(self.view.full_cmd);
+            c.all_procs = Some(self.view.all);
             c.chart_style = self.saved_chart_style;
             c.look = self.saved_look;
             c.hidden = Panel::ALL.into_iter().filter(|p| self.hidden.contains(p)).collect();

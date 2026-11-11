@@ -1,12 +1,34 @@
 //! Host-side data: CPU/RAM, environment detection, and joining GPU
 //! processes with OS process info.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sysinfo::{Components, Disks, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind, Users};
 
-use crate::model::{GpuProcess, HostInfo, HostSample, PidMapping, PidScope, ProcRow};
+use crate::model::{GpuProcess, HostInfo, HostSample, NO_GPU, PidMapping, PidScope, ProcRow};
 use crate::os::PidResolver;
+
+/// Host process list size: the busiest by CPU, plus the largest by RAM.
+pub const HOST_PROCS_BY_CPU: usize = 80;
+pub const HOST_PROCS_BY_RAM: usize = 20;
+
+fn user_of(o: &sysinfo::Process, users: &mut Users, names: &mut HashMap<String, Option<String>>) -> Option<String> {
+    let uid = o.user_id()?;
+    names
+        .entry(uid.to_string())
+        .or_insert_with(|| {
+            users.refresh();
+            users.get_user_by_id(uid).map(|u| u.name().to_string())
+        })
+        .clone()
+}
+
+fn name_and_cmd(o: &sysinfo::Process) -> (String, String) {
+    let name = o.name().to_string_lossy().into_owned();
+    let cmd: Vec<String> = o.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
+    let cmdline = if cmd.is_empty() { name.clone() } else { cmd.join(" ") };
+    (name, cmdline)
+}
 
 pub struct Host {
     sys: System,
@@ -229,18 +251,12 @@ impl Host {
             })
             .collect();
 
-        // A process using several GPUs appears once per GPU; refresh it once.
-        let mut local: Vec<Pid> = joined.iter().filter_map(|j| j.2.map(Pid::from_u32)).collect();
-        local.sort_unstable();
-        local.dedup();
-        if !local.is_empty() {
-            let kind = ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory()
-                .with_cmd(UpdateKind::OnlyIfNotSet)
-                .with_user(UpdateKind::OnlyIfNotSet);
-            self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&local), true, kind);
-        }
+        // Every process, once per tick: GPU rows join against it and the
+        // host process list (`other_processes`) reads from it. Refreshing
+        // twice in one tick would measure CPU over a few milliseconds.
+        let kind =
+            ProcessRefreshKind::nothing().with_cpu().with_memory().with_cmd(UpdateKind::OnlyIfNotSet).with_user(UpdateKind::OnlyIfNotSet);
+        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 
         let rows: Vec<ProcRow> = joined
             .into_iter()
@@ -248,19 +264,8 @@ impl Host {
                 let os = local_pid.and_then(|l| self.sys.process(Pid::from_u32(l)));
                 let (name, cmdline, user, cpu, rss, runtime) = match os {
                     Some(o) => {
-                        let user = o.user_id().and_then(|uid| {
-                            let users = &mut self.users;
-                            self.user_names
-                                .entry(uid.to_string())
-                                .or_insert_with(|| {
-                                    users.refresh();
-                                    users.get_user_by_id(uid).map(|u| u.name().to_string())
-                                })
-                                .clone()
-                        });
-                        let name = o.name().to_string_lossy().into_owned();
-                        let cmd: Vec<String> = o.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
-                        let mut cmdline = if cmd.is_empty() { name.clone() } else { cmd.join(" ") };
+                        let user = user_of(o, &mut self.users, &mut self.user_names);
+                        let (name, mut cmdline) = name_and_cmd(o);
                         if name.eq_ignore_ascii_case("vmwp.exe") {
                             // GPU work done inside WSL2 / Docker Desktop / Hyper-V VMs is
                             // attributed to the VM worker process on the Windows side.
@@ -276,18 +281,64 @@ impl Host {
                         (n.clone(), n, None, None, None, None)
                     }
                 };
-                let container = local_pid.and_then(|l| {
-                    self.containers
-                        .entry(l)
-                        .or_insert_with(|| std::fs::read_to_string(format!("/proc/{l}/cgroup")).ok().and_then(|t| container_of(&t)))
-                        .clone()
-                });
+                let container = local_pid.and_then(|l| self.container(l));
                 ProcRow { gpu, usage, local_pid, mapping, name, cmdline, user, cpu, rss, runtime, spilling: false, container }
             })
             .collect();
+        rows
+    }
+
+    fn container(&mut self, pid: u32) -> Option<String> {
+        self.containers
+            .entry(pid)
+            .or_insert_with(|| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok().and_then(|t| container_of(&t)))
+            .clone()
+    }
+
+    /// The busiest processes that aren't in `gpu_rows`: the top
+    /// [`HOST_PROCS_BY_CPU`] by CPU plus the top [`HOST_PROCS_BY_RAM`] by
+    /// memory, from the process table [`Host::processes`] refreshed this tick.
+    pub fn other_processes(&mut self, gpu_rows: &[ProcRow]) -> Vec<ProcRow> {
+        let on_gpu: HashSet<u32> = gpu_rows.iter().filter_map(|r| r.local_pid).collect();
+        let me = std::process::id();
+        let mut cands: Vec<(u32, f32, u64)> = self
+            .sys
+            .processes()
+            .iter()
+            .filter(|(pid, p)| p.thread_kind().is_none() && pid.as_u32() != 0 && !on_gpu.contains(&pid.as_u32()))
+            .map(|(pid, p)| (pid.as_u32(), p.cpu_usage(), p.memory()))
+            .collect();
+        cands.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)));
+        let mut pick: Vec<u32> = cands.iter().take(HOST_PROCS_BY_CPU).map(|c| c.0).collect();
+        let by_cpu: HashSet<u32> = pick.iter().copied().collect();
+        cands.sort_by(|a, b| b.2.cmp(&a.2));
+        pick.extend(cands.iter().map(|c| c.0).filter(|p| !by_cpu.contains(p)).take(HOST_PROCS_BY_RAM));
+
+        let mut rows = Vec::with_capacity(pick.len());
+        for pid in pick {
+            let Some(o) = self.sys.process(Pid::from_u32(pid)) else { continue };
+            let user = user_of(o, &mut self.users, &mut self.user_names);
+            let (name, cmdline) = name_and_cmd(o);
+            let (cpu, rss, runtime) = (o.cpu_usage(), o.memory(), o.run_time());
+            let container = self.container(pid);
+            rows.push(ProcRow {
+                gpu: NO_GPU,
+                usage: GpuProcess { pid, scope: PidScope::Local, ..Default::default() },
+                local_pid: Some(pid),
+                mapping: PidMapping::Direct,
+                name,
+                cmdline: if pid == me { format!("{cmdline}  [this monitor]") } else { cmdline },
+                user,
+                cpu: Some(cpu),
+                rss: Some(rss),
+                runtime: Some(runtime),
+                spilling: false,
+                container,
+            });
+        }
         // Forget containers of processes that are gone (pids get reused).
-        if self.containers.len() > rows.len() * 2 + 64 {
-            let live: std::collections::HashSet<u32> = rows.iter().filter_map(|r| r.local_pid).collect();
+        if self.containers.len() > 4096 {
+            let live: HashSet<u32> = self.sys.processes().keys().map(|p| p.as_u32()).collect();
             self.containers.retain(|pid, _| live.contains(pid));
         }
         rows

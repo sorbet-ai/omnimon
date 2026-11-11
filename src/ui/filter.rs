@@ -3,6 +3,7 @@
 //!   python gpu:0 user:alice      text match + GPU + user
 //!   pid:4242                     driver or local PID
 //!   type:c / type:g              compute / graphics
+//!   type:cpu                     processes that don't use a GPU
 //!   spill                        only processes spilling into system memory
 
 use crate::model::{ProcKind, ProcRow};
@@ -14,6 +15,7 @@ pub struct Filter {
     user: Option<String>,
     pid: Option<u32>,
     kind: Option<ProcKind>,
+    cpu_only: bool,
     spill: bool,
 }
 
@@ -26,6 +28,7 @@ impl Filter {
                 Some(("gpu", v)) if v.parse::<usize>().is_ok() => f.gpu = v.parse().ok(),
                 Some(("user", v)) => f.user = Some(v.to_string()),
                 Some(("pid", v)) if v.parse::<u32>().is_ok() => f.pid = v.parse().ok(),
+                Some(("type", "cpu")) => f.cpu_only = true,
                 Some(("type", v)) => {
                     f.kind = match v {
                         "c" | "compute" => Some(ProcKind::Compute),
@@ -46,7 +49,8 @@ impl Filter {
         self.gpu.is_none_or(|g| p.gpu == g)
             && self.user.as_ref().is_none_or(|u| p.user.as_deref().is_some_and(|pu| pu.to_lowercase().contains(u)))
             && self.pid.is_none_or(|pid| p.pid() == pid || p.local_pid == Some(pid))
-            && self.kind.is_none_or(|k| p.usage.kind == k || p.usage.kind == ProcKind::Both)
+            && self.kind.is_none_or(|k| p.on_gpu() && (p.usage.kind == k || p.usage.kind == ProcKind::Both))
+            && (!self.cpu_only || !p.on_gpu())
             && (!self.spill || p.spilling)
             && self.words.iter().all(|w| {
                 cmd().contains(w)
@@ -93,5 +97,12 @@ mod tests {
         assert_eq!(m("spill"), [2]);
         assert_eq!(m("python gpu:1"), Vec::<u32>::new());
         assert_eq!(Filter::parse("  "), Filter::default());
+
+        let c = row(crate::model::NO_GPU, 3, "carol", "make -j32", ProcKind::Compute, false);
+        let m = |q: &str| [&a, &b, &c].iter().filter(|p| Filter::parse(q).matches(p)).map(|p| p.pid()).collect::<Vec<_>>();
+        assert_eq!(m("type:cpu"), [3]);
+        assert_eq!(m("type:c"), [1], "CPU-only rows aren't compute GPU processes");
+        assert_eq!(m("gpu:0"), [1]);
+        assert_eq!(m("make"), [3]);
     }
 }

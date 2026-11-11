@@ -128,6 +128,10 @@ pub struct ProcView {
     pub spec: ViewSpec,
     /// Only show the selected GPU's processes.
     pub gpu_only: bool,
+    /// Show every busy process (CPU-only ones too), not just GPU processes.
+    pub all: bool,
+    /// Sort in effect before switching to all processes, restored after.
+    saved_sort: Option<(SortKey, bool)>,
     pub table: RefCell<TableState>,
     /// The selected process; the selection follows it across refreshes.
     pub sel_key: Option<(usize, u32)>,
@@ -142,6 +146,8 @@ impl ProcView {
             rows: Vec::new(),
             spec: ViewSpec { filter: String::new(), gpu: None, sort, desc: desc.unwrap_or(sort.default_desc()) },
             gpu_only: false,
+            all: false,
+            saved_sort: None,
             table: RefCell::new(TableState::default().with_selected(Some(0))),
             sel_key: None,
             filter_edit: false,
@@ -175,6 +181,28 @@ impl ProcView {
         let idx = cur.saturating_add(delta).clamp(0, self.rows.len() as isize - 1) as usize;
         self.sel_key = self.row(procs, idx).map(ProcRow::key);
         self.table.borrow_mut().select(Some(idx));
+    }
+
+    /// Switch between GPU processes and all processes. GPU-only sort keys
+    /// mean nothing for CPU processes, so all-processes mode sorts by CPU and
+    /// switching back restores the previous order (unless it was changed).
+    pub fn toggle_all(&mut self) {
+        self.all = !self.all;
+        // A different list: start at its top rather than chasing the old row.
+        self.sel_key = None;
+        self.table.borrow_mut().select(Some(0));
+        if self.all {
+            if matches!(self.spec.sort, SortKey::GpuMem | SortKey::SharedMem | SortKey::Sm | SortKey::Gpu) {
+                self.saved_sort = Some((self.spec.sort, self.spec.desc));
+                self.spec.sort = SortKey::Cpu;
+                self.spec.desc = true;
+            }
+        } else if let Some((k, d)) = self.saved_sort.take()
+            && self.spec.sort == SortKey::Cpu
+        {
+            self.spec.sort = k;
+            self.spec.desc = d;
+        }
     }
 
     /// Sort by `k`; picking the current key again flips the direction.

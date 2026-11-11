@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use super::Backend;
 use crate::model::{
-    Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, HostSample, MigInstance, NvLink, PidScope, ProcKind, Snapshot, Throttle, Vendor,
+    Activity, BackendInfo, GpuInfo, GpuProcess, GpuSample, HostSample, MigInstance, NO_GPU, NvLink, PidMapping, PidScope, ProcKind,
+    ProcRow, Snapshot, Throttle, Vendor,
 };
 
 const GIB: u64 = 1 << 30;
@@ -295,6 +296,38 @@ pub fn dress(s: &mut Snapshot) {
         disk_write: Some((40e6 * wave(13.0, 3.0)) as u64),
         cpu_temp: Some(58.0 + 8.0 * wave(30.0, 0.0) as f32),
     };
+    // The real host's processes never appear in demo mode (screenshots).
+    const HOST_PROCS: [(&str, &str, &str, f32, u64); 8] = [
+        ("python", "python dataloader.py --workers 16 --shard 3", "alice", 640.0, 22),
+        ("postgres", "postgres: writer process", "postgres", 35.0, 6),
+        ("node", "node /srv/label-ui/server.js", "bob", 18.0, 2),
+        ("rsync", "rsync -a /data/ckpt/ backup:/ckpt/", "ci", 55.0, 1),
+        ("prometheus", "prometheus --config.file=/etc/prometheus.yml", "prometheus", 6.0, 3),
+        ("sshd", "sshd: alice@pts/2", "root", 0.4, 0),
+        ("tmux", "tmux new -s train", "alice", 0.2, 0),
+        ("redis-server", "redis-server *:6379", "redis", 3.0, 4),
+    ];
+    s.host_processes = HOST_PROCS
+        .iter()
+        .enumerate()
+        .map(|(k, &(name, cmd, user, cpu, ram))| {
+            let pid = 2100 + 37 * k as u32;
+            ProcRow {
+                gpu: NO_GPU,
+                usage: GpuProcess { pid, scope: PidScope::Synthetic, ..Default::default() },
+                local_pid: None,
+                mapping: PidMapping::Direct,
+                name: name.into(),
+                cmdline: cmd.into(),
+                user: Some(user.into()),
+                cpu: Some(cpu * (0.6 + 0.4 * wave(6.0 + k as f64, k as f64)) as f32),
+                rss: Some(ram * GIB + (((k as u64 + 1) * 150) << 20)),
+                runtime: Some(86400 * (1 + k as u64) + t as u64 % 3600),
+                spilling: false,
+                container: None,
+            }
+        })
+        .collect();
     const USERS: [&str; 3] = ["alice", "bob", "ci"];
     for (k, p) in s.processes.iter_mut().enumerate() {
         let pid = p.usage.pid as u64;

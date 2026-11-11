@@ -15,6 +15,8 @@ pub struct Config {
     pub sort: Option<crate::ui::SortKey>,
     pub sort_desc: Option<bool>,
     pub full_cmd: Option<bool>,
+    /// Process table shows every busy process, not only GPU ones.
+    pub all_procs: Option<bool>,
     pub chart_style: Option<crate::ui::ChartStyle>,
     /// How charts and bars use color: rainbow, mono, heat, outline, minimal.
     pub look: Option<crate::ui::Look>,

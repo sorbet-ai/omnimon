@@ -39,6 +39,9 @@ hardware; see [Platforms](#platforms-and-data-sources).
   enc/dec, CPU, RAM, runtime, user, command. Sort, filter, tag and signal.
   `Enter` opens the process: parent chain, children, exe, cwd, GPU-relevant
   environment (`CUDA_VISIBLE_DEVICES`, `HIP_*`, `NCCL_*`...), and its history.
+  `a` adds the busiest CPU-only processes (top 80 by CPU and 20 by RAM), so
+  a data loader pegging the CPU or a runaway build shows up next to the GPU
+  jobs it is starving.
 - **Charts**: utilization, memory, power, temperature, SM clock, PCIe rx/tx;
   on Hopper and newer also tensor-core activity and real memory bandwidth.
   Real anti-aliased pixel plots in terminals that support images (kitty,
@@ -66,7 +69,8 @@ hardware; see [Platforms](#platforms-and-data-sources).
   restarts.
 - **Tuning**: `w` sets the selected GPU's power limit (needs admin/root).
 - **Command palette** (`:`): `theme nord`, `sort cpu`, `filter gpu:0 spill`,
-  `hide host`, `show procs`, `charts blocks`, `interval 2`, `gpu 1`, `view events`.
+  `hide host`, `show procs`, `procs all`, `charts blocks`, `interval 2`, `gpu 1`,
+  `view events`.
 - **Headless**: `--once`, `--json`, `--json --watch` (JSON lines), `--serve`
   (Prometheus `/metrics` + `/json`), `--diagnose`.
 - **Remote**: run `--serve 0.0.0.0:9465` on a headless box and
@@ -189,11 +193,11 @@ omnimon --theme nord        color theme; --no-color for plain output
 
 Keys (press `?` for the live list): `1-4`/`Tab` views, `←→` GPU, `↑↓`
 select, `s` sort, `/` filter, `:` command, `Enter` process details, `space`
-tag, `K` signal, `w` tune, `<` `>` rewind, `0` live, `t` theme, `G` chart
+tag, `a` all processes, `K` signal, `w` tune, `<` `>` rewind, `0` live, `t` theme, `G` chart
 style, `L` chart colors, `+ -` refresh rate, `p` pause, `q` quit.
 
 Filter syntax: free text plus `gpu:0`, `user:alice`, `pid:1234`,
-`type:c|g`, `spill`, all ANDed.
+`type:c|g|cpu`, `spill`, all ANDed.
 
 Config (`~/.config/omnimon/config.json`, `%APPDATA%\omnimon` on Windows) is
 written on exit. Hand-edit it to rebind keys or turn off the history file:

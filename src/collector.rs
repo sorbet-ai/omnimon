@@ -112,11 +112,13 @@ impl Collector {
             g.spill = spill::analyze(&self.gpus[i], g, &mut mine, &self.thresholds);
         }
 
+        let host_processes = self.host.other_processes(&rows);
         let mut snap = Snapshot {
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
             host: self.host.sample(),
             gpus,
             processes: rows,
+            host_processes,
             events: Vec::new(),
         };
         if self.demo {

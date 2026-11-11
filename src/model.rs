@@ -426,6 +426,8 @@ pub enum PidMapping {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProcRow {
+    /// GPU index, or [`NO_GPU`] for a process that only uses the CPU.
+    #[serde(default = "no_gpu", skip_serializing_if = "is_no_gpu")]
     pub gpu: usize,
     /// What the GPU backend reported (pid is in `usage.scope`'s namespace).
     #[serde(flatten)]
@@ -447,7 +449,23 @@ pub struct ProcRow {
     pub container: Option<String>,
 }
 
+/// `ProcRow::gpu` of a CPU-only process (the host process list).
+pub const NO_GPU: usize = usize::MAX;
+
+fn no_gpu() -> usize {
+    NO_GPU
+}
+
+fn is_no_gpu(g: &usize) -> bool {
+    *g == NO_GPU
+}
+
 impl ProcRow {
+    /// False for CPU-only rows from the host process list.
+    pub fn on_gpu(&self) -> bool {
+        self.gpu != NO_GPU
+    }
+
     /// Driver-reported PID (identity within one GPU).
     pub fn pid(&self) -> u32 {
         self.usage.pid
@@ -517,6 +535,10 @@ pub struct Snapshot {
     pub host: HostSample,
     pub gpus: Vec<GpuSample>,
     pub processes: Vec<ProcRow>,
+    /// The busiest processes that don't use a GPU (by CPU, plus the largest
+    /// by RAM). Kept apart from `processes` so they never produce events.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub host_processes: Vec<ProcRow>,
     /// What changed since the previous snapshot.
     #[serde(default)]
     pub events: Vec<crate::events::Event>,
