@@ -266,6 +266,10 @@ impl App {
         self.store.hist.power_frac(i, s, self.gpu(i)?.power_limit_max)
     }
 
+    fn power_max_frac(&self, i: usize, s: &GpuSample) -> Option<f64> {
+        self.store.hist.power_max_frac(i, s, self.gpu(i)?.power_limit_max)
+    }
+
     /// Charts in the main view. Terminal images sit on top of text, so
     /// while a popup is open they fall back to block charts; otherwise each
     /// refresh would paint over the popup.

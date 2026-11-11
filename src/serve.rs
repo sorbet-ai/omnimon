@@ -92,6 +92,12 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
             .collect(),
     );
     metric("gpu_utilization_percent", "GPU core utilization.", "gauge", per(&|g| g.util_gpu.map(f64::from)));
+    metric(
+        "gpu_utilization_max_percent",
+        "Highest GPU utilization reading within the sampling interval.",
+        "gauge",
+        per(&|g| g.util_gpu_max.map(f64::from)),
+    );
     metric("gpu_memory_bandwidth_utilization_percent", "Memory controller utilization.", "gauge", per(&|g| g.util_mem.map(f64::from)));
     let act = |f: fn(&crate::model::Activity) -> Option<f32>| per(&|g| g.activity.as_ref().and_then(f).map(f64::from));
     metric("gpu_sm_active_percent", "Share of time SMs had work (GPM).", "gauge", act(|a| a.sm_active));
@@ -134,7 +140,14 @@ pub fn prometheus(info: &SystemInfo, s: &Snapshot) -> String {
     metric("gpu_temperature_celsius", "GPU core temperature.", "gauge", per(&|g| g.temp.map(f64::from)));
     metric("gpu_memory_temperature_celsius", "Memory temperature.", "gauge", per(&|g| g.temp_mem.map(f64::from)));
     metric("gpu_fan_percent", "Mean fan speed.", "gauge", per(&|g| g.fan().map(f64::from)));
-    metric("gpu_power_watts", "Power draw.", "gauge", per(&|g| g.power));
+    metric(
+        "gpu_power_watts",
+        "Power draw (average over the sampling interval where the driver buffers readings).",
+        "gauge",
+        per(&|g| g.power),
+    );
+    metric("gpu_power_max_watts", "Highest power reading within the sampling interval.", "gauge", per(&|g| g.power_max));
+    metric("gpu_power_min_watts", "Lowest power reading within the sampling interval.", "gauge", per(&|g| g.power_min));
     metric("gpu_power_limit_watts", "Enforced power limit.", "gauge", per(&|g| g.power_limit));
     metric("gpu_energy_joules_total", "Energy consumed since driver load.", "counter", per(&|g| g.energy_joules));
     metric("gpu_sm_clock_mhz", "SM clock.", "gauge", per(&|g| g.clock_sm.or(g.clock_graphics).map(f64::from)));

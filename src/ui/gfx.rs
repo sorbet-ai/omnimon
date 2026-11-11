@@ -45,6 +45,9 @@ impl ChartStyle {
 /// series in one chart are drawn as stacked lanes, first on top.
 pub struct Series<'a> {
     pub data: &'a [Option<f64>],
+    /// Highest value within each sample (same length and scale as `data`),
+    /// drawn as a faint band above it.
+    pub peak: Option<&'a [Option<f64>]>,
     pub grad: Gradient,
 }
 
@@ -239,8 +242,8 @@ impl ChartCtx<'_> {
         }
         for (s, a) in series.iter().zip(lanes(area, series.len())) {
             match self.style {
-                ChartStyle::Braille => f.render_widget(AreaChart { data: s.data, grad: s.grad }, a),
-                _ => f.render_widget(BlockChart { data: s.data, grad: s.grad }, a),
+                ChartStyle::Braille => f.render_widget(AreaChart { data: s.data, peak: s.peak, grad: s.grad }, a),
+                _ => f.render_widget(BlockChart { data: s.data, peak: s.peak, grad: s.grad }, a),
             }
         }
     }
@@ -384,6 +387,42 @@ pub fn render(w: u32, h: u32, scale: f32, series: &[Series], bg: Color) -> RgbaI
         }
 
         let (ymin, ymax) = (y0.min(y1), y0.max(y1));
+        // Peak band: the per-sample maximum, filled faintly down to the
+        // baseline before the main area, so it shows only above the average.
+        if let Some(peak) = s.peak {
+            let np = peak.len().min(n);
+            let mut pb = PathBuilder::new();
+            let mut open = false;
+            for (i, v) in peak[peak.len() - np..].iter().enumerate() {
+                let x = wf - pad - (np - 1 - i) as f32 * step;
+                match v {
+                    Some(v) => {
+                        let y = y0 + (y1 - y0) * v.clamp(0.0, 1.0) as f32;
+                        if !open {
+                            pb.move_to(x, y0);
+                            open = true;
+                        }
+                        pb.line_to(x, y);
+                    }
+                    None if open => {
+                        pb.line_to(x - step, y0);
+                        pb.close();
+                        open = false;
+                    }
+                    None => {}
+                }
+            }
+            if open {
+                pb.line_to(wf - pad, y0);
+                pb.close();
+            }
+            if let Some(path) = pb.finish() {
+                let mut p = Paint::default();
+                p.set_color(sk(paint(s.grad, 0.7, 0.7, false), 0.22));
+                p.anti_alias = true;
+                pm.fill_path(&path, &p, FillRule::Winding, Transform::identity(), None);
+            }
+        }
         for run in runs.iter().filter(|r| !r.is_empty()) {
             let curve = |pb: &mut PathBuilder| smooth(pb, run, ymin, ymax);
 
@@ -478,7 +517,8 @@ mod tests {
             .collect();
         let mem: Vec<Option<f64>> = (0..240).map(|i| Some((0.25 + 0.5 * (1.0 - (-(i as f64) / 25.0).exp())).min(0.78))).collect();
         let bg = Color::Rgb(26, 27, 38);
-        let img = render(1400, 360, 1.4, &[Series { data: &util, grad: t.util }, Series { data: &mem, grad: t.mem }], bg);
+        let img =
+            render(1400, 360, 1.4, &[Series { data: &util, peak: None, grad: t.util }, Series { data: &mem, peak: None, grad: t.mem }], bg);
         img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/img/pixel-chart.png")).unwrap();
     }
 
@@ -488,15 +528,32 @@ mod tests {
         let util: Vec<Option<f64>> = (0..120).map(|i| Some((0.55 + 0.4 * ((i as f64) / 9.0).sin()).clamp(0.0, 1.0))).collect();
         let mem: Vec<Option<f64>> = (0..120).map(|i| if i < 10 { None } else { Some(0.3 + 0.002 * i as f64) }).collect();
         let bg = Color::Rgb(26, 27, 38);
-        let img = render(900, 220, 1.0, &[Series { data: &util, grad: t.util }, Series { data: &mem, grad: t.mem }], bg);
+        let img =
+            render(900, 220, 1.0, &[Series { data: &util, peak: None, grad: t.util }, Series { data: &mem, peak: None, grad: t.mem }], bg);
         assert_eq!(img.dimensions(), (900, 220));
         let dir = std::env::temp_dir();
         let _ = img.save(dir.join("chart-lanes.png"));
-        let img = render(600, 300, 1.0, &[Series { data: &util, grad: t.power }], bg);
+        let img = render(600, 300, 1.0, &[Series { data: &util, peak: None, grad: t.power }], bg);
         let _ = img.save(dir.join("chart-single.png"));
+        // Power with its in-sample peaks, a gap included.
+        let peak: Vec<Option<f64>> = util
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if (40..44).contains(&i) { None } else { v.map(|v| (v * 1.25 + 0.04).min(1.0)) })
+            .collect();
+        let avg: Vec<Option<f64>> = util.iter().enumerate().map(|(i, v)| if (40..44).contains(&i) { None } else { *v }).collect();
+        let img = render(600, 300, 1.0, &[Series { data: &avg, peak: Some(&peak), grad: t.power }], bg);
+        assert_eq!(img.dimensions(), (600, 300));
+        let _ = img.save(dir.join("chart-peak.png"));
         for l in Look::ALL {
             super::super::theme::set_look(l, bg);
-            let img = render(900, 220, 1.0, &[Series { data: &util, grad: t.util }, Series { data: &mem, grad: t.mem }], bg);
+            let img = render(
+                900,
+                220,
+                1.0,
+                &[Series { data: &util, peak: None, grad: t.util }, Series { data: &mem, peak: None, grad: t.mem }],
+                bg,
+            );
             let _ = img.save(dir.join(format!("chart-look-{}.png", l.name())));
         }
         super::super::theme::set_look(Look::Rainbow, bg);

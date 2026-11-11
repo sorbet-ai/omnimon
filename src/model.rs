@@ -331,6 +331,12 @@ pub struct Activity {
 #[serde(default)]
 pub struct GpuSample {
     pub util_gpu: Option<f32>,
+    /// Lowest and highest utilization the driver saw within the sampling
+    /// interval (NVIDIA: ~5 readings per second).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub util_gpu_min: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub util_gpu_max: Option<f32>,
     pub util_mem: Option<f32>,
     pub mem_used: Option<u64>,
     pub mem_total: Option<u64>,
@@ -341,7 +347,14 @@ pub struct GpuSample {
     pub temp: Option<u32>,
     pub temp_mem: Option<u32>,
     pub fans: Vec<u32>,
+    /// Watts. Where the driver buffers readings (NVIDIA, every ~20 ms) this
+    /// is the average over the sampling interval, not one instant.
     pub power: Option<f64>,
+    /// Lowest and highest power reading within the interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_max: Option<f64>,
     pub power_limit: Option<f64>,
     pub energy_joules: Option<f64>,
     pub clock_graphics: Option<u32>,

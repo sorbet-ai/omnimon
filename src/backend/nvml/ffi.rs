@@ -117,6 +117,18 @@ pub struct nvmlPciInfo_t {
     pub bus_id: [c_char; 32],
 }
 
+/// nvmlSample_t: a timestamp (µs) and an 8-byte nvmlValue_t union whose
+/// member is given by the nvmlValueType_t the call returns.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct nvmlSample_t {
+    pub time_stamp: c_ulonglong,
+    pub value: u64,
+}
+
+pub const NVML_TOTAL_POWER_SAMPLES: c_int = 0;
+pub const NVML_GPU_UTILIZATION_SAMPLES: c_int = 1;
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct nvmlProcessUtilizationSample_t {
@@ -298,6 +310,7 @@ nvml_api! {
     conf_compute_mem_size_info: unsafe extern "C" fn() -> nvmlReturn_t = "nvmlDeviceGetConfComputeMemSizeInfo";
     running_process_detail_list: unsafe extern "C" fn() -> nvmlReturn_t = "nvmlDeviceGetRunningProcessDetailList";
     process_utilization: unsafe extern "C" fn(nvmlDevice_t, *mut nvmlProcessUtilizationSample_t, *mut c_uint, c_ulonglong) -> nvmlReturn_t = "nvmlDeviceGetProcessUtilization";
+    samples: unsafe extern "C" fn(nvmlDevice_t, c_int, c_ulonglong, *mut c_int, *mut c_uint, *mut nvmlSample_t) -> nvmlReturn_t = "nvmlDeviceGetSamples";
 
     gpm_query_support: unsafe extern "C" fn(nvmlDevice_t, *mut nvmlGpmSupport_t) -> nvmlReturn_t = "nvmlGpmQueryDeviceSupport";
     gpm_sample_alloc: unsafe extern "C" fn(*mut nvmlGpmSample_t) -> nvmlReturn_t = "nvmlGpmSampleAlloc";

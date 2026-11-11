@@ -193,8 +193,17 @@ impl Backend for Demo {
             } else if l > 0.85 {
                 throttle.push(Throttle::PowerCap);
             }
+            // Real GPUs swing well above and below their average within a
+            // second (power transients); fake a plausible range.
+            let (dip, spike) = (0.55 + 0.3 * self.rand(), 1.15 + 0.35 * self.rand());
+            let power = tdp * (0.12 + 0.85 * l);
+            let util = (l * 100.0).round() as f32;
             out.push(GpuSample {
-                util_gpu: (!mig).then(|| (l * 100.0).round() as f32),
+                util_gpu: (!mig).then_some(util),
+                util_gpu_min: (!mig).then(|| (util * dip as f32).round()),
+                util_gpu_max: (!mig).then(|| (util * spike as f32).min(100.0).round()),
+                power_min: Some(power * dip),
+                power_max: Some(power * spike),
                 util_mem: Some((l * 55.0).round() as f32),
                 mem_used: Some((total as f64 * mem_frac) as u64),
                 mem_total: Some(total),
@@ -203,7 +212,7 @@ impl Backend for Demo {
                 temp: Some(temp),
                 temp_mem: if g.num_fans == 0 { Some(temp + 6) } else { None },
                 fans: if g.num_fans > 0 { vec![(30.0 + 50.0 * l) as u32] } else { vec![] },
-                power: Some(tdp * (0.12 + 0.85 * l)),
+                power: Some(power),
                 power_limit: Some(tdp),
                 energy_joules: Some(t * tdp * 0.6),
                 clock_graphics: Some((g.max_clock_graphics.unwrap() as f64 * (0.3 + 0.65 * l)) as u32),

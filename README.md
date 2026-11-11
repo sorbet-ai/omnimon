@@ -33,6 +33,14 @@ hardware; see [Platforms](#platforms-and-data-sources).
   utilization, memory, power and temperature. On 8+ GPU boxes the cards
   collapse to one line each. Borders turn red on spill, thermal throttling,
   power brake, ECC errors or a lost GPU.
+- **Peaks between samples** (NVIDIA): the driver records power every ~20 ms
+  and utilization every ~200 ms. Each tick reads everything since the last
+  one, so power is the true average over the interval (from the energy
+  counter) and the bars and charts shade the highest reading above it. An
+  idle RTX 4090 swings between 4 W and 18 W within one second, and a 1 s
+  poll would show just one of those values. Also exported as `power_min`,
+  `power_max`, `util_gpu_min`, `util_gpu_max` in JSON and
+  `gpu_power_max_watts` / `gpu_utilization_max_percent` in Prometheus.
 - **Host**: the same layout for the machine: CPU with per-core load, memory,
   swap, network and disk throughput, CPU temperature, load.
 - **Processes**: GPU memory, memory spilled to system RAM (`SYS-MEM`), SM %,

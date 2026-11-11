@@ -116,14 +116,17 @@ pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
         ),
         ("Temperature", format!("{}{}", fmt::opt(sm.temp, "°C"), sm.temp_mem.map(|m| format!(" · memory {m}°C")).unwrap_or_default())),
         ("Fan", if sm.fans.is_empty() { na() } else { sm.fans.iter().map(|f| format!("{f}%")).collect::<Vec<_>>().join(" · ") }),
-        (
-            "Power",
-            match (sm.power, sm.power_limit) {
+        ("Power", {
+            let v = match (sm.power, sm.power_limit) {
                 (Some(p), Some(l)) => format!("{p:.1} W / {l:.0} W limit"),
                 (Some(p), None) => format!("{p:.1} W"),
                 _ => na(),
-            },
-        ),
+            };
+            match (sm.power_min, sm.power_max) {
+                (Some(lo), Some(hi)) => format!("{v} · {lo:.0}–{hi:.0} W within the last sample"),
+                _ => v,
+            }
+        }),
         ("Energy", o(sm.energy_joules.map(|j| format!("{:.3} kWh since driver load", j / 3.6e6)))),
         ("This session", {
             let j = app.store.hist.gpus.get(i).map(|h| h.energy).unwrap_or(0.0);

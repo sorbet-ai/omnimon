@@ -58,8 +58,11 @@ impl Ring {
 #[derive(Default)]
 pub struct GpuHist {
     pub util: Ring,
+    /// Highest utilization / power within each sample (where reported).
+    pub util_max: Ring,
     pub mem: Ring,
     pub power: Ring,
+    pub power_max: Ring,
     pub temp: Ring,
     pub clock: Ring,
     pub rx: Ring,
@@ -115,9 +118,19 @@ impl History {
         {
             let gap = last + d / 2.0;
             for h in &mut self.gpus {
-                for r in
-                    [&mut h.util, &mut h.mem, &mut h.power, &mut h.temp, &mut h.clock, &mut h.rx, &mut h.tx, &mut h.tensor, &mut h.dram]
-                {
+                for r in [
+                    &mut h.util,
+                    &mut h.util_max,
+                    &mut h.mem,
+                    &mut h.power,
+                    &mut h.power_max,
+                    &mut h.temp,
+                    &mut h.clock,
+                    &mut h.rx,
+                    &mut h.tx,
+                    &mut h.tensor,
+                    &mut h.dram,
+                ] {
                     r.push(gap, None);
                 }
             }
@@ -132,11 +145,13 @@ impl History {
         }
         for ((h, g), gi) in self.gpus.iter_mut().zip(&s.gpus).zip(&info.gpus) {
             h.util.push(t, g.util_gpu.map(|v| v as f64 / 100.0));
+            h.util_max.push(t, g.util_gpu_max.map(|v| v as f64 / 100.0));
             h.mem.push(t, g.mem_frac());
-            if let Some(p) = g.power {
+            if let Some(p) = g.power_max.or(g.power) {
                 h.peak_power = h.peak_power.max(p);
             }
             h.power.push(t, power_frac(g, gi.power_limit_max, h.peak_power));
+            h.power_max.push(t, power_scaled(g, g.power_max, gi.power_limit_max, h.peak_power));
             let tmax = gi.temp_shutdown.unwrap_or(100).max(1) as f64;
             h.temp.push(t, g.temp.map(|v| v as f64 / tmax));
             h.clock.push(
@@ -203,11 +218,21 @@ impl History {
     pub fn power_frac(&self, i: usize, s: &GpuSample, limit_max: Option<f64>) -> Option<f64> {
         power_frac(s, limit_max, self.gpus.get(i)?.peak_power)
     }
+
+    /// The interval's highest power reading on the same scale.
+    pub fn power_max_frac(&self, i: usize, s: &GpuSample, limit_max: Option<f64>) -> Option<f64> {
+        power_scaled(s, s.power_max, limit_max, self.gpus.get(i)?.peak_power)
+    }
 }
 
 fn power_frac(s: &GpuSample, limit_max: Option<f64>, peak: f64) -> Option<f64> {
+    power_scaled(s, s.power, limit_max, peak)
+}
+
+/// Watts as a fraction of the power limit (or of the highest draw seen).
+fn power_scaled(s: &GpuSample, watts: Option<f64>, limit_max: Option<f64>, peak: f64) -> Option<f64> {
     let scale = s.power_limit.or(limit_max).unwrap_or(peak.max(5.0));
-    s.power.map(|p| (p / scale).min(1.0))
+    watts.map(|p| (p / scale).min(1.0))
 }
 
 #[cfg(test)]

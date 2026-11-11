@@ -18,6 +18,8 @@ use crate::fmt;
 enum Data<'a> {
     /// History, normalized to [0,1].
     Fraction(&'a Ring),
+    /// Like `Fraction`, with each sample's highest value as a faint band.
+    Peaked(&'a Ring, &'a Ring),
     /// History of a rate (bytes/s), scaled to the window's peak; optionally
     /// with a second rate in a lane below (rx/tx).
     Rate(&'a Ring, Option<(&'a Ring, Gradient)>),
@@ -70,7 +72,7 @@ fn gpu_charts(f: &mut Frame, app: &App, area: Rect, i: usize) {
     let t = app.theme();
     let (Some(g), Some(sm), Some(h)) = (app.gpu(i), app.sample(i), app.store.hist.gpus.get(i)) else { return };
     let mut charts = vec![
-        Chart { title: "GPU utilization", value: fmt::pct(sm.util_gpu), data: Data::Fraction(&h.util), grad: t.util },
+        Chart { title: "GPU utilization", value: fmt::pct(sm.util_gpu), data: Data::Peaked(&h.util, &h.util_max), grad: t.util },
         Chart {
             title: "Memory",
             value: match (sm.mem_used, sm.mem_total) {
@@ -82,12 +84,18 @@ fn gpu_charts(f: &mut Frame, app: &App, area: Rect, i: usize) {
         },
         Chart {
             title: "Power",
-            value: match (sm.power, sm.power_limit) {
-                (Some(p), Some(l)) => format!("{p:.0} W / {l:.0} W"),
-                (Some(p), None) => format!("{p:.0} W"),
-                _ => "N/A".into(),
+            value: {
+                let v = match (sm.power, sm.power_limit) {
+                    (Some(p), Some(l)) => format!("{p:.0} W / {l:.0} W"),
+                    (Some(p), None) => format!("{p:.0} W"),
+                    _ => "N/A".into(),
+                };
+                match (sm.power_min, sm.power_max) {
+                    (Some(lo), Some(hi)) => format!("{v} · {lo:.0}–{hi:.0} W"),
+                    _ => v,
+                }
             },
-            data: Data::Fraction(&h.power),
+            data: Data::Peaked(&h.power, &h.power_max),
             grad: t.power,
         },
         Chart { title: "Temperature", value: fmt::opt(sm.temp, "°C"), data: Data::Fraction(&h.temp), grad: t.temp },
@@ -204,10 +212,10 @@ fn grid(f: &mut Frame, app: &App, area: Rect, charts: &[Chart], slot_base: u32) 
                         break;
                     }
                     let col = Rect { x, width: (w as u16).saturating_sub(u16::from(w > 1)).max(1), ..inner };
-                    f.render_widget(BlockChart { data: std::slice::from_ref(v), grad: c.grad }, col);
+                    f.render_widget(BlockChart { data: std::slice::from_ref(v), peak: None, grad: c.grad }, col);
                 }
             }
-            Data::Fraction(ring) | Data::Rate(ring, _) => {
+            Data::Fraction(ring) | Data::Peaked(ring, _) | Data::Rate(ring, _) => {
                 let w = ctx.samples(inner.width);
                 let raw = app.store.hist.tail(ring, w);
                 let secs = app.store.hist.span(ring, w).unwrap_or(w as f64 * app.interval.as_secs_f64()) as u64;
@@ -218,22 +226,27 @@ fn grid(f: &mut Frame, app: &App, area: Rect, charts: &[Chart], slot_base: u32) 
                     let norm = |v: &[Option<f64>]| v.iter().map(|x| x.map(|x| x / max)).collect::<Vec<_>>();
                     let (a, b2) = (norm(raw), norm(other));
                     f.render_widget(b.title_bottom(footer(format!(" peak {} ", fmt::rate(max as u64)))), cell);
-                    let mut series = vec![Series { data: &a, grad: c.grad }];
+                    let mut series = vec![Series { data: &a, peak: None, grad: c.grad }];
                     if let Some((_, g2)) = second {
-                        series.push(Series { data: &b2, grad: *g2 });
+                        series.push(Series { data: &b2, peak: None, grad: *g2 });
                     }
                     ctx.draw(f, inner, slot, &series);
                 } else {
+                    let peak = match &c.data {
+                        Data::Peaked(_, p) => Some(app.store.hist.tail(p, w)).filter(|p| p.iter().any(Option::is_some)),
+                        _ => None,
+                    };
                     let vals: Vec<f64> = raw.iter().flatten().copied().collect();
                     let b = if vals.is_empty() {
                         b
                     } else {
                         let avg = vals.iter().sum::<f64>() / vals.len() as f64;
-                        let max = vals.iter().copied().fold(f64::MIN, f64::max);
+                        // With per-sample peaks, "max" is the highest reading, not the highest average.
+                        let max = vals.iter().chain(peak.iter().flat_map(|p| p.iter().flatten())).copied().fold(f64::MIN, f64::max);
                         b.title_bottom(footer(format!(" avg {:.0}%  max {:.0}% ", avg * 100.0, max * 100.0)))
                     };
                     f.render_widget(b, cell);
-                    ctx.draw(f, inner, slot, &[Series { data: raw, grad: c.grad }]);
+                    ctx.draw(f, inner, slot, &[Series { data: raw, peak, grad: c.grad }]);
                 }
             }
         }

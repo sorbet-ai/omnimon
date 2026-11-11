@@ -60,6 +60,8 @@ enum M {
     GraphicsProcs,
     MpsProcs,
     ProcUtil,
+    PowerSamples,
+    UtilSamples,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +79,11 @@ struct Dev {
     links: Option<links::Links>,
     /// MIG partitions, when MIG mode is on.
     mig: Option<mig::Mig>,
+    /// Newest driver-buffered sample already read, per sample type (µs).
+    seen_power: u64,
+    seen_util: u64,
+    /// Previous energy counter reading (J) and when it was taken.
+    prev_energy: Option<(f64, std::time::Instant)>,
 }
 
 /// Two GPM sample buffers: metrics come from the previous tick's sample and
@@ -254,7 +261,7 @@ impl Nvml {
             }
             let mig = mig::Mig::probe(&api, h);
             log::debug!("NVML device {i}: GPM {}, NVLink {}, MIG {}", gpm.is_some(), links.is_some(), mig.is_some());
-            devs.push(Dev { h: Handle(h), info, unsupported: 0, gpm, links, mig });
+            devs.push(Dev { h: Handle(h), info, unsupported: 0, gpm, links, mig, seen_power: 0, seen_util: 0, prev_energy: None });
         }
 
         let info = BackendInfo {
@@ -445,6 +452,77 @@ fn throttle_reasons(bits: u64) -> Vec<Throttle> {
     MAP.iter().filter(|(b, _)| bits & b != 0).map(|(_, t)| t.clone()).collect()
 }
 
+/// Driver-buffered samples of one type newer than `*seen` (µs), oldest
+/// first; advances `*seen`. NOT_FOUND (nothing new) is an empty list.
+fn buffered(api: &Api, h: nvmlDevice_t, kind: c_int, seen: &mut u64) -> Result<Vec<f64>, nvmlReturn_t> {
+    let (mut vt, mut n): (c_int, c_uint) = (0, 0);
+    match call!(api.samples, h, kind, *seen, &mut vt, &mut n, std::ptr::null_mut()) {
+        Ok(()) | Err(NVML_ERROR_INSUFFICIENT_SIZE) => {}
+        Err(NVML_ERROR_NOT_FOUND) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    }
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut buf = vec![nvmlSample_t::default(); n as usize];
+    match call!(api.samples, h, kind, *seen, &mut vt, &mut n, buf.as_mut_ptr()) {
+        Ok(()) => {}
+        Err(NVML_ERROR_NOT_FOUND) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    }
+    buf.truncate(n as usize);
+    // The first read returns the whole buffer (several seconds); keep it, it
+    // is still recent. Samples can arrive out of order across calls.
+    let newest = buf.iter().map(|x| x.time_stamp).max().unwrap_or(*seen);
+    let vals = buf.iter().filter(|x| x.time_stamp > *seen).filter_map(|x| sample_value(vt, x.value)).collect();
+    *seen = newest.max(*seen);
+    Ok(vals)
+}
+
+/// Decode an nvmlValue_t (little-endian union) by its nvmlValueType_t.
+fn sample_value(vt: c_int, raw: u64) -> Option<f64> {
+    let v = match vt {
+        0 => f64::from_bits(raw),
+        1 => raw as u32 as f64,
+        // unsigned long: 4 bytes on Windows, 8 elsewhere.
+        2 => {
+            if cfg!(windows) {
+                raw as u32 as f64
+            } else {
+                raw as f64
+            }
+        }
+        3 => raw as f64,
+        4 => raw as i64 as f64,
+        5 => raw as u32 as i32 as f64,
+        6 => raw as u16 as f64,
+        _ => return None,
+    };
+    v.is_finite().then_some(v)
+}
+
+/// Stretch a measured range so it contains the value shown next to it (the
+/// two come from slightly different windows).
+fn widen<T: PartialOrd + Copy>(min: &mut Option<T>, max: &mut Option<T>, v: Option<T>) {
+    if let (Some(lo), Some(hi), Some(v)) = (min.as_mut(), max.as_mut(), v) {
+        if v < *lo {
+            *lo = v;
+        }
+        if v > *hi {
+            *hi = v;
+        }
+    }
+}
+
+/// Min, mean and max of a window of samples. Pure, so it is tested.
+fn min_mean_max(v: &[f64]) -> Option<(f64, f64, f64)> {
+    if v.is_empty() {
+        return None;
+    }
+    let (min, max) = v.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    Some((min, v.iter().sum::<f64>() / v.len() as f64, max))
+}
+
 fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
     let h = d.h.0;
     let mut s = GpuSample::default();
@@ -520,6 +598,28 @@ fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
         let mut v: c_uint = 0;
         call!(api.power_usage, h, &mut v).map(|_| v as f64 / 1000.0)
     });
+    // The driver samples power every ~20 ms and utilization every ~200 ms
+    // into a ring buffer. Reading what arrived since the last tick gives the
+    // interval's real average and range instead of one instantaneous value.
+    let mut seen = d.seen_power;
+    let window = d.q(M::PowerSamples, || buffered(api, h, NVML_TOTAL_POWER_SAMPLES, &mut seen));
+    d.seen_power = seen;
+    if let Some(w) = window
+        && let Some((min, mean, max)) = min_mean_max(&w)
+    {
+        s.power = Some(mean / 1000.0);
+        s.power_min = Some(min / 1000.0);
+        s.power_max = Some(max / 1000.0);
+    }
+    let mut seen = d.seen_util;
+    let window = d.q(M::UtilSamples, || buffered(api, h, NVML_GPU_UTILIZATION_SAMPLES, &mut seen));
+    d.seen_util = seen;
+    if let Some(w) = window
+        && let Some((min, _, max)) = min_mean_max(&w)
+    {
+        s.util_gpu_min = Some(min.min(100.0) as f32);
+        s.util_gpu_max = Some(max.min(100.0) as f32);
+    }
     s.power_limit = d.q(M::PowerLimit, || {
         let mut v: c_uint = 0;
         call!(api.enforced_power_limit, h, &mut v).map(|_| v as f64 / 1000.0)
@@ -528,6 +628,20 @@ fn sample_dev(api: &Api, d: &mut Dev, v3_stride: usize) -> GpuSample {
         let mut v: c_ulonglong = 0;
         call!(api.total_energy, h, &mut v).map(|_| v as f64 / 1000.0)
     });
+    // The energy counter gives the exact average over the interval; the
+    // buffered readings give its range.
+    let now = std::time::Instant::now();
+    if let Some(e) = s.energy_joules {
+        if let Some((pe, pt)) = d.prev_energy {
+            let dt = now.duration_since(pt).as_secs_f64();
+            if dt > 0.05 && e >= pe {
+                s.power = Some((e - pe) / dt);
+            }
+        }
+        d.prev_energy = Some((e, now));
+    }
+    widen(&mut s.power_min, &mut s.power_max, s.power);
+    widen(&mut s.util_gpu_min, &mut s.util_gpu_max, s.util_gpu);
 
     s.clock_graphics = d.q(M::ClkGr, || dev_u32_arg(api.clock_info, h, NVML_CLOCK_GRAPHICS));
     s.clock_sm = d.q(M::ClkSm, || dev_u32_arg(api.clock_info, h, NVML_CLOCK_SM));
@@ -802,6 +916,23 @@ fn processes(api: &Api, d: &mut Dev, v3_stride: usize) -> Vec<GpuProcess> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffered_sample_values_and_ranges() {
+        assert_eq!(sample_value(1, 13208), Some(13208.0), "unsigned int (power in mW)");
+        assert_eq!(sample_value(0, 42.5f64.to_bits()), Some(42.5));
+        assert_eq!(sample_value(6, 0xFFFF_0007), Some(7.0), "unsigned short ignores the upper bytes");
+        assert_eq!(sample_value(5, 0xFFFF_FFFF), Some(-1.0));
+        assert_eq!(sample_value(9, 1), None);
+        assert_eq!(min_mean_max(&[]), None);
+        assert_eq!(min_mean_max(&[4.0, 10.0, 16.0]), Some((4.0, 10.0, 16.0)));
+        let (mut lo, mut hi) = (Some(5.0), Some(9.0));
+        widen(&mut lo, &mut hi, Some(12.0));
+        assert_eq!((lo, hi), (Some(5.0), Some(12.0)));
+        let (mut lo, mut hi) = (None, None);
+        widen(&mut lo, &mut hi, Some(1.0));
+        assert_eq!((lo, hi), (None::<f64>, None), "no range is not invented");
+    }
 
     fn entries(stride: usize, list: &[(u32, u64)]) -> Vec<u8> {
         let mut b = vec![0u8; stride * list.len() + 64];

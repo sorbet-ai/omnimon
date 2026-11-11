@@ -13,6 +13,8 @@ const EIGHTHS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'
 /// gradient (so a full bar runs green -> red, btop style).
 pub struct GradBar {
     pub frac: Option<f64>,
+    /// Highest value within the sample, drawn as a light band past `frac`.
+    pub peak: Option<f64>,
     pub grad: Gradient,
     pub track: Color,
 }
@@ -33,6 +35,7 @@ impl Widget for GradBar {
         let frac = frac.clamp(0.0, 1.0);
         let filled = frac * w as f64;
         let last = (filled.ceil() as usize).saturating_sub(1);
+        let peak_cells = self.peak.map(|p| (p.clamp(0.0, 1.0) * w as f64).round() as usize).unwrap_or(0);
         let thin = matches!(look(), Look::Outline | Look::Minimal);
         for i in 0..w {
             let pos = (i as f64 + 0.5) / w as f64;
@@ -41,7 +44,13 @@ impl Widget for GradBar {
             let amount = (filled - i as f64).clamp(0.0, 1.0);
             if thin {
                 // A line rather than a slab: heavy where filled, light track after.
-                let (ch, fg) = if amount > 0.0 { ('━', paint(self.grad, pos, frac, true)) } else { ('─', self.track) };
+                let (ch, fg) = if amount > 0.0 {
+                    ('━', paint(self.grad, pos, frac, true))
+                } else if i < peak_cells {
+                    ('─', paint(self.grad, pos, frac, false))
+                } else {
+                    ('─', self.track)
+                };
                 cell.set_char(ch).set_style(Style::new().fg(fg));
                 continue;
             }
@@ -50,6 +59,8 @@ impl Widget for GradBar {
             } else if amount > 0.0 {
                 let e = ((amount * 8.0) as usize).max(1);
                 cell.set_char(EIGHTHS[e]).set_style(Style::new().fg(col).bg(self.track));
+            } else if i < peak_cells {
+                cell.set_char('░').set_style(Style::new().fg(col).bg(self.track));
             } else {
                 cell.set_char(' ').set_style(Style::new().bg(self.track));
             }
@@ -61,6 +72,8 @@ impl Widget for GradBar {
 /// cell holds two samples. Rows are colored along a vertical gradient.
 pub struct AreaChart<'a> {
     pub data: &'a [Option<f64>],
+    /// Per-sample highest value, marked with a dot above the area.
+    pub peak: Option<&'a [Option<f64>]>,
     pub grad: Gradient,
 }
 
@@ -111,6 +124,31 @@ impl Widget for AreaChart<'_> {
                 buf[(area.x + cx as u16, y)].set_char(ch).set_fg(col);
             }
         }
+        let Some(peak) = self.peak else { return };
+        let np = peak.len();
+        let level = |slot: usize| -> Option<usize> {
+            let from_right = slots - 1 - slot;
+            let v = if from_right >= np { None } else { peak[np - 1 - from_right] }?;
+            Some(((v.clamp(0.0, 1.0) * total_dots).round() as usize).max(1))
+        };
+        for cx in 0..w {
+            for (slot, dots_up) in [(cx * 2, LEFT_UP), (cx * 2 + 1, RIGHT_UP)] {
+                let (Some(d), v) = (level(slot), sample(slot).unwrap_or(0.0)) else { continue };
+                if d as f64 <= (v.clamp(0.0, 1.0) * total_dots).round() {
+                    continue;
+                }
+                let row = (d - 1) / 4;
+                let y = area.y + (h - 1 - row.min(h - 1)) as u16;
+                let cell = &mut buf[(area.x + cx as u16, y)];
+                let old = cell.symbol().chars().next().map(|c| c as u32).filter(|c| (0x2800..0x2900).contains(c)).unwrap_or(0x2800);
+                let bits = (old - 0x2800) as u8 | dots_up[(d - 1) % 4];
+                let fresh = old == 0x2800;
+                cell.set_char(char::from_u32(0x2800 + bits as u32).unwrap_or(' '));
+                if fresh {
+                    cell.set_fg(paint(self.grad, (row as f64 + 0.5) / h as f64, v, false));
+                }
+            }
+        }
     }
 }
 
@@ -142,6 +180,8 @@ impl Widget for Spark<'_> {
 /// 1/8-cell vertical precision, rows colored along a vertical gradient.
 pub struct BlockChart<'a> {
     pub data: &'a [Option<f64>],
+    /// Per-sample highest value, shaded lightly above the solid area.
+    pub peak: Option<&'a [Option<f64>]>,
     pub grad: Gradient,
 }
 
@@ -162,6 +202,16 @@ impl Widget for BlockChart<'_> {
                 eighths = 1;
             }
             let top = eighths.div_ceil(8).saturating_sub(1);
+            // Whole cells above the solid area, up to the peak, get a light shade.
+            let np = self.peak.map_or(0, |p| p.len());
+            let peak = self.peak.and_then(|p| if from_right < np { p[np - 1 - from_right] } else { None });
+            if let Some(pk) = peak.filter(|&p| p > v) {
+                let rows = ((pk.clamp(0.0, 1.0) * h as f64).round() as usize).min(h);
+                for row in eighths.div_ceil(8)..rows {
+                    let col = paint(self.grad, (row as f64 + 0.5) / h as f64, v, false);
+                    buf[(area.x + cx as u16, area.y + (h - 1 - row) as u16)].set_char('░').set_fg(col);
+                }
+            }
             for row in 0..h {
                 let fill = eighths.saturating_sub(row * 8).min(8);
                 if fill == 0 {
