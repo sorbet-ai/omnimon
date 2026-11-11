@@ -72,8 +72,8 @@ struct Cli {
     #[arg(long, value_name = "ADDR", conflicts_with_all = ["serve", "demo"])]
     connect: Option<String>,
 
-    /// Record to disk without the UI (with --serve: serve and record). The UI
-    /// records while it runs anyway.
+    /// Record to disk while running: with the UI in a terminal, headless
+    /// otherwise (a service, output redirected) or with --serve.
     #[arg(long, conflicts_with = "connect")]
     record: bool,
 
@@ -134,6 +134,7 @@ fn main() -> anyhow::Result<()> {
             graphics: cli.graphics.clone(),
             remote: Some(addr.clone()),
             look: cli.look.clone(),
+            recordings: None,
             record: None,
             replay: None,
         };
@@ -170,9 +171,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let dir = || cli.recordings.clone().or_else(|| recording::host_dir(&info.host.hostname)).context("no state directory to record to");
-    if cli.record {
-        let w = recording::Writer::new(dir()?, &info, interval.as_secs_f64(), keep);
+    let dir = cli.recordings.clone().or_else(|| recording::host_dir(&info.host.hostname));
+    use std::io::IsTerminal;
+    let headless = cli.serve.is_some() || !std::io::stdout().is_terminal();
+    if cli.record && headless {
+        let w = recording::Writer::new(dir.context("no state directory to record to")?, &info, interval.as_secs_f64(), keep);
         match &cli.serve {
             Some(addr) => return serve::run(collector, info, interval, addr, &cfg, Some(w)),
             None => return recording::run(collector, interval, w, keep, &cfg),
@@ -182,15 +185,17 @@ fn main() -> anyhow::Result<()> {
         return serve::run(collector, info, interval, addr, &cfg, None);
     }
 
-    // Demos aren't recorded.
+    // Recording is opt-in: --record, or "record_history": true in the config
+    // (never for demos). Existing recordings are shown either way.
     let demo = !info.gpus.is_empty() && info.gpus.iter().all(|g| g.vendor == model::Vendor::Demo);
-    let record = if cfg.record_history == Some(false) || demo { None } else { dir().ok().map(|d| (d, keep)) };
+    let record = (cli.record || (cfg.record_history == Some(true) && !demo)).then_some(keep);
     let opts = ui::UiOptions {
         theme: cli.theme.clone(),
         readonly: cli.readonly,
         graphics: cli.graphics.clone(),
         remote: None,
         look: cli.look.clone(),
+        recordings: dir,
         record,
         replay: None,
     };
@@ -296,6 +301,7 @@ fn replay(cli: &Cli, when: &str, cfg: config::Config) -> anyhow::Result<()> {
         graphics: cli.graphics.clone(),
         remote: None,
         look: cli.look.clone(),
+        recordings: None,
         record: None,
         replay: Some(loaded.snaps),
     };

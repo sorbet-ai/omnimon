@@ -20,7 +20,7 @@ spilling out of VRAM.
 | AMD / Intel on Windows | ✗ | ✗ | ✓¹ |
 | Apple Silicon, no sudo, per-process GPU % | partial | ✗ | ✓ |
 | Measured VRAM spill per process | ✗ | ✗ | ✓ |
-| Rewind through recent history, across restarts | ✗ | ✗ | ✓ |
+| Rewind through recent history | ✗ | ✗ | ✓ |
 | Headless recorder with replay | ✗ | ✗ | ✓ |
 | Prometheus / JSON exporter built in | ✗ | separate package | ✓ |
 
@@ -74,10 +74,12 @@ hardware; see [Platforms](#platforms-and-data-sources).
 - **Events**: timeline of spills, clock limiters, errors, process start/exit.
 - **Rewind**: `<` `>` step back and forth through recent history (`{` `}` 60
   samples, `0` back to live). The whole screen shows that moment: cards,
-  processes, spill state. The UI records while it runs, so the last hour
-  survives restarts.
-- **Recorder and replay**: `--record` samples and records without the UI
-  (`--serve --record` does both); `--replay` opens a recording in the full
+  processes, spill state. If this machine has recordings (below), rewind
+  reaches back into them, across restarts.
+- **Recorder and replay**: nothing is written to disk unless you ask.
+  `omnimon --record` records while it runs: with the UI in a terminal (● REC
+  in the header), headless when there's no terminal (a service, output
+  redirected) or with `--serve`. `--replay` opens a recording in the full
   UI, positioned at its start: `--replay` (the latest hour), `--replay 2h`
   (two hours ago), `--replay 14:00`, `--replay "2026-11-10 14:00..15:30"`.
   `--replay ... --json` prints the recorded snapshots as JSON lines, in the
@@ -90,12 +92,7 @@ hardware; see [Platforms](#platforms-and-data-sources).
   processes: each file holds a minute-by-minute full snapshot and only what
   changed in between, gzip-compressed (`.rec` files are valid gzip, of JSON
   lines). The UI and a recorder can run together: one writes, the other
-  takes over when it stops. To record from login: on Windows
-  `scripts/recorder-windows.ps1` (a logon task, no window, no admin); on
-  Linux a systemd user service, `ExecStart=/usr/local/bin/omnimon --record`
-  in `~/.config/systemd/user/omnimon-recorder.service` with
-  `WantedBy=default.target`, then `systemctl --user enable --now
-  omnimon-recorder`.
+  takes over when it stops.
 - **Tuning**: `w` sets the selected GPU's power limit (needs admin/root).
 - **Command palette** (`:`): `theme nord`, `sort cpu`, `filter gpu:0 spill`,
   `hide host`, `show procs`, `procs all`, `charts blocks`, `interval 2`, `gpu 1`,
@@ -213,7 +210,7 @@ omnimon --once              one-shot summary with diagnosis
 omnimon --json [--watch]    snapshot / JSON lines (schema in report.rs)
 omnimon --serve [ADDR]      Prometheus exporter (default 127.0.0.1:9465)
 omnimon --connect HOST      watch another machine running --serve (read-only)
-omnimon --record            record without the UI (--keep 7d, --recordings DIR)
+omnimon --record            record while running (--keep 7d, --recordings DIR)
 omnimon --replay [WHEN]     look at a recording: 2h, 14:00, "2026-11-10 14:00..15:00"
 omnimon --replay A --once   sum up a recorded range (--diff B: compare two)
 omnimon --diagnose          what was detected, and why things are missing
@@ -232,12 +229,12 @@ Filter syntax: free text plus `gpu:0`, `user:alice`, `pid:1234`,
 `type:c|g|cpu`, `spill`, all ANDed.
 
 Config (`~/.config/omnimon/config.json`, `%APPDATA%\omnimon` on Windows) is
-written on exit. Hand-edit it to rebind keys, turn off recording from the
-UI, or change how much is kept:
+written on exit. Hand-edit it to rebind keys, always record from the UI,
+or change how much is kept:
 
 ```json
 { "keys": { "kill": ["x", "f9"], "quit": ["q"] }, "hidden": ["host"],
-  "record_history": false, "record_keep": "3d", "record_max_mb": 500 }
+  "record_history": true, "record_keep": "3d", "record_max_mb": 500 }
 ```
 
 Recordings (including process command lines and user names) go to

@@ -48,8 +48,11 @@ pub struct UiOptions {
     pub remote: Option<String>,
     /// Chart colors (`--look`).
     pub look: Option<String>,
-    /// Record to this folder, keeping this much (None: don't record).
-    pub record: Option<(std::path::PathBuf, crate::recording::Retention)>,
+    /// This machine's recordings: shown (rewind reaches into them) and, with
+    /// `record`, written.
+    pub recordings: Option<std::path::PathBuf>,
+    /// Record, keeping this much.
+    pub record: Option<crate::recording::Retention>,
     /// Show these recorded snapshots instead of live data.
     pub replay: Option<Vec<crate::model::Snapshot>>,
 }
@@ -827,9 +830,9 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
         forced => gfx::Gfx::detect(Some(forced)),
     };
     let mut app = App::new(info, interval, opts, &cfg, gfx);
-    app.store = match (replay, &opts.record) {
+    app.store = match (replay, &opts.recordings) {
         (Some(snaps), _) => store::Store::replay(&app.info, snaps, interval.as_secs_f64()),
-        (None, Some((dir, keep))) => store::Store::open(&app.info, interval.as_secs_f64(), dir.clone(), *keep),
+        (None, Some(dir)) => store::Store::open(&app.info, interval.as_secs_f64(), dir.clone(), opts.record),
         (None, None) => store::Store::default(),
     };
     app.refresh_view();

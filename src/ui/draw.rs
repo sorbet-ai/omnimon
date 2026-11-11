@@ -182,6 +182,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
     } else {
         vec![s("every ", t.faint), s(rate, t.dim), Span::raw("  "), s(now, t.fg).bold(), Span::raw(" ")]
     };
+    let right = match app.store.recording_to() {
+        Some((_, true)) => [vec![s("● REC", t.crit).bold(), Span::raw("  ")], right].concat(),
+        _ => right,
+    };
     let rw: usize = right.iter().map(|s| s.width()).sum();
 
     f.render_widget(Paragraph::new(Line::from(left)), area);

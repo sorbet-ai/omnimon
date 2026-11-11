@@ -33,14 +33,14 @@ pub struct Store {
 
 impl Store {
     /// Load this machine's recent recordings from `dir` (seeding history,
-    /// the rewind buffer and the event log) and keep recording there.
-    pub fn open(info: &SystemInfo, interval: f64, dir: PathBuf, keep: Retention) -> Store {
+    /// the rewind buffer and the event log), and record there if `keep` is set.
+    pub fn open(info: &SystemInfo, interval: f64, dir: PathBuf, keep: Option<Retention>) -> Store {
         recording::remove_legacy();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
         let ids: Vec<String> = info.gpus.iter().map(|g| g.stable_id()).collect();
         let past = recording::load_recent(&dir, Some(&ids), now - LOAD_MAX_AGE, KEEP).snaps;
         let mut st = Store::seeded(info, past, interval);
-        st.recorder = Some(Writer::new(dir, info, interval, keep));
+        st.recorder = keep.map(|keep| Writer::new(dir, info, interval, keep));
         st
     }
 

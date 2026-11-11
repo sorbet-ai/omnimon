@@ -32,8 +32,8 @@ pub struct Config {
     pub alert_min: Option<crate::events::Severity>,
     /// Electricity price for cost estimates (any currency per kWh).
     pub price_per_kwh: Option<f64>,
-    /// Write samples to the state directory for rewind across restarts
-    /// (default true).
+    /// Record whenever the UI runs, as if started with --record (default
+    /// false).
     pub record_history: Option<bool>,
     /// How long recordings are kept, e.g. "7d" or "48h" (default 7d).
     pub record_keep: Option<String>,
