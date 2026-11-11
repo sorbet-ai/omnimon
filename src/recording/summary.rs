@@ -98,6 +98,22 @@ pub struct ProcSum {
     pub seen_secs: f64,
 }
 
+#[derive(Serialize, Default, Clone)]
+pub struct CpuProcSum {
+    pub pid: u32,
+    pub name: String,
+    /// Also uses a GPU.
+    pub gpu: bool,
+    /// Core-seconds of CPU (two cores busy for 10 s = 20 s).
+    pub cpu_secs: f64,
+    /// Highest CPU, % of one core.
+    pub cpu_max: f32,
+    /// Bytes.
+    pub rss_max: Option<u64>,
+    /// Seconds seen.
+    pub seen_secs: f64,
+}
+
 #[derive(Serialize, Default)]
 pub struct Summary {
     pub from: f64,
@@ -109,6 +125,9 @@ pub struct Summary {
     pub host: HostSum,
     /// Busiest GPU processes, by GPU time.
     pub processes: Vec<ProcSum>,
+    /// Busiest processes by CPU time, GPU or not. Recordings keep only the
+    /// busiest few CPU-only processes per sample, so quieter ones are missing.
+    pub cpu_processes: Vec<CpuProcSum>,
     /// Event counts by kind.
     pub events: BTreeMap<String, usize>,
 }
@@ -133,6 +152,7 @@ pub struct Builder {
     gpus: Vec<GpuAcc>,
     cpu: Acc,
     procs: HashMap<(usize, u32, String), ProcSum>,
+    cpu_procs: HashMap<(u32, String), CpuProcSum>,
 }
 
 impl Builder {
@@ -142,7 +162,7 @@ impl Builder {
             ..Default::default()
         };
         let gpus = info.gpus.iter().map(|_| GpuAcc::default()).collect();
-        Builder { interval, s, last_t: None, gpus, cpu: Acc::default(), procs: HashMap::new() }
+        Builder { interval, s, last_t: None, gpus, cpu: Acc::default(), procs: HashMap::new(), cpu_procs: HashMap::new() }
     }
 
     pub fn add(&mut self, snap: &Snapshot) {
@@ -210,6 +230,24 @@ impl Builder {
             e.vram_max = e.vram_max.max(p.usage.gpu_mem);
             e.seen_secs += dt;
         }
+        // A process on two GPUs is listed twice; count its CPU once.
+        let mut counted = std::collections::HashSet::new();
+        for p in snap.processes.iter().chain(&snap.host_processes) {
+            let Some(cpu) = p.cpu else { continue };
+            if !counted.insert(p.pid()) {
+                continue;
+            }
+            let e = self.cpu_procs.entry((p.pid(), p.name.clone())).or_insert_with(|| CpuProcSum {
+                pid: p.pid(),
+                name: p.name.clone(),
+                ..Default::default()
+            });
+            e.gpu |= p.on_gpu();
+            e.cpu_secs += cpu as f64 / 100.0 * dt;
+            e.cpu_max = e.cpu_max.max(cpu);
+            e.rss_max = e.rss_max.max(p.rss);
+            e.seen_secs += dt;
+        }
         for ev in &snap.events {
             *self.s.events.entry(ev.kind.name().to_string()).or_default() += 1;
         }
@@ -232,6 +270,10 @@ impl Builder {
         procs.sort_by(|a, b| b.gpu_secs.total_cmp(&a.gpu_secs).then(b.vram_max.cmp(&a.vram_max)));
         procs.truncate(TOP);
         self.s.processes = procs;
+        let mut cpu: Vec<CpuProcSum> = self.cpu_procs.into_values().filter(|p| p.cpu_secs > 0.0).collect();
+        cpu.sort_by(|a, b| b.cpu_secs.total_cmp(&a.cpu_secs));
+        cpu.truncate(TOP);
+        self.s.cpu_processes = cpu;
         self.s
     }
 }
@@ -338,6 +380,24 @@ fn procs(s: &Summary) -> Vec<String> {
         .collect()
 }
 
+fn cpu_procs(s: &Summary) -> Vec<String> {
+    s.cpu_processes
+        .iter()
+        .map(|p| {
+            format!(
+                "  {:<4} {:>7}  {:<28} {:>8} CPU time  {:>5.0}% max  {:>9} RAM peak  seen {}",
+                if p.gpu { "gpu" } else { "cpu" },
+                p.pid,
+                crate::fmt::truncate(&p.name, 28),
+                show(Some(p.cpu_secs), Unit::Secs),
+                p.cpu_max,
+                show(p.rss_max.map(|v| v as f64), Unit::Bytes),
+                show(Some(p.seen_secs), Unit::Secs)
+            )
+        })
+        .collect()
+}
+
 pub fn print(s: &Summary) {
     println!("{}", span(s));
     for g in &s.gpus {
@@ -349,6 +409,10 @@ pub fn print(s: &Summary) {
     if !s.processes.is_empty() {
         println!("busiest GPU processes");
         procs(s).iter().for_each(|l| println!("{l}"));
+    }
+    if !s.cpu_processes.is_empty() {
+        println!("busiest CPU processes (CPU time in core-seconds)");
+        cpu_procs(s).iter().for_each(|l| println!("{l}"));
     }
     if !s.events.is_empty() {
         println!("events  {}", s.events.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(" · "));
@@ -374,6 +438,10 @@ pub fn print_diff(a: &Summary, b: &Summary) {
             println!("busiest GPU processes in {name}");
             procs(s).iter().for_each(|l| println!("{l}"));
         }
+        if !s.cpu_processes.is_empty() {
+            println!("busiest CPU processes in {name}");
+            cpu_procs(s).iter().for_each(|l| println!("{l}"));
+        }
     }
 }
 
@@ -396,6 +464,15 @@ mod tests {
                 gpu: 0,
                 name: "train".into(),
                 usage: GpuProcess { pid: 7, sm_util: Some(util), gpu_mem: Some(1 << 30), ..Default::default() },
+                cpu: Some(100.0),
+                ..Default::default()
+            }],
+            host_processes: vec![ProcRow {
+                gpu: crate::model::NO_GPU,
+                name: "compile".into(),
+                usage: GpuProcess { pid: 9, ..Default::default() },
+                cpu: Some(400.0),
+                rss: Some(1 << 20),
                 ..Default::default()
             }],
             ..Default::default()
@@ -426,5 +503,9 @@ mod tests {
         assert_eq!(g.energy_wh, Some((450.0 + 2700.0) / 3600.0));
         assert_eq!(s.processes[0].gpu_secs, 10.0);
         assert_eq!(s.processes[0].vram_max, Some(1 << 30));
+        // CPU time in core-seconds, GPU and CPU-only processes together.
+        let names: Vec<(&str, f64, bool)> = s.cpu_processes.iter().map(|p| (p.name.as_str(), p.cpu_secs, p.gpu)).collect();
+        assert_eq!(names, [("compile", 80.0, false), ("train", 20.0, true)]);
+        assert_eq!(s.cpu_processes[0].rss_max, Some(1 << 20));
     }
 }

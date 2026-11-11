@@ -85,8 +85,8 @@ hardware; see [Platforms](#platforms-and-data-sources).
   `--replay ... --json` prints the recorded snapshots as JSON lines, in the
   same format as `--json --watch`. `--replay WHEN --once` sums a range up
   (utilization and power mean/p95/max, busy time, energy, memory and
-  temperature peaks, time spent clock-limited or spilling, the busiest
-  processes, event counts); `--replay A --diff B` puts two ranges side by
+  temperature peaks, time spent clock-limited or spilling, the busiest GPU
+  and CPU processes, event counts); `--replay A --diff B` puts two ranges side by
   side, e.g. last night's run against tonight's (`--json` for either). Recordings keep 7 days (`--keep 48h`,
   at most 1 GB) and take about 2 MB per hour on a desktop with ~50 GPU
   processes: each file holds a minute-by-minute full snapshot and only what
