@@ -281,6 +281,8 @@ impl Backend for Demo {
 
 /// Cores of the simulated host.
 pub const HOST_CORES: usize = 64;
+/// The made-up machine's name (demos never show the real one).
+pub const HOSTNAME: &str = "gpu-node-01";
 
 /// Replace this machine's host data in a demo snapshot with a simulated
 /// training node (busy data loaders, lots of RAM, no swap), and give the

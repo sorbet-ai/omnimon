@@ -147,7 +147,15 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, hit: &mut Hit) {
             left.push(s(v.as_str(), t.fg));
         }
     }
-    if app.store.rewind > 0
+    if app.store.replay
+        && let Some(snap) = app.snap()
+    {
+        let when = chrono::DateTime::from_timestamp(snap.timestamp as i64, 0)
+            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default();
+        left.push(Span::raw("  "));
+        left.push(Span::styled(format!(" ▶ REPLAY {when} "), Style::new().fg(Color::Black).bg(t.accent2).bold()));
+    } else if app.store.rewind > 0
         && let Some(snap) = app.snap()
     {
         let ago = app.store.newest().map(|n| (n.timestamp - snap.timestamp).max(0.0) as u64).unwrap_or(0);

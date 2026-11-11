@@ -12,7 +12,6 @@ mod overview;
 mod popups;
 mod procs;
 mod procview;
-mod recorder;
 mod store;
 mod theme;
 mod timeline;
@@ -49,6 +48,10 @@ pub struct UiOptions {
     pub remote: Option<String>,
     /// Chart colors (`--look`).
     pub look: Option<String>,
+    /// Record to this folder, keeping this much (None: don't record).
+    pub record: Option<(std::path::PathBuf, crate::recording::Retention)>,
+    /// Show these recorded snapshots instead of live data.
+    pub replay: Option<Vec<crate::model::Snapshot>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -810,7 +813,9 @@ impl App {
     }
 }
 
-pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, opts: &UiOptions, cfg: Config) -> anyhow::Result<()> {
+pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, mut opts: UiOptions, cfg: Config) -> anyhow::Result<()> {
+    let replay = opts.replay.take();
+    let opts = &opts;
     let sampler = Sampler::spawn(source, interval);
     let mut terminal = ratatui::init();
     crate::logging::capture(true);
@@ -822,8 +827,11 @@ pub fn run(source: impl Source + 'static, info: SystemInfo, interval: Duration, 
         forced => gfx::Gfx::detect(Some(forced)),
     };
     let mut app = App::new(info, interval, opts, &cfg, gfx);
-    let record = cfg.record_history != Some(false) && !app.info.gpus.iter().all(|g| g.vendor == crate::model::Vendor::Demo);
-    app.store = store::Store::open(&app.info, interval.as_secs_f64(), record);
+    app.store = match (replay, &opts.record) {
+        (Some(snaps), _) => store::Store::replay(&app.info, snaps, interval.as_secs_f64()),
+        (None, Some((dir, keep))) => store::Store::open(&app.info, interval.as_secs_f64(), dir.clone(), *keep),
+        (None, None) => store::Store::default(),
+    };
     app.refresh_view();
     if app.chart_ctx().pixels() {
         app.toast(format!("charts: pixels ({}) · press G if they stay empty", app.gfx.protocol_name()), false);

@@ -35,6 +35,10 @@ pub struct Config {
     /// Write samples to the state directory for rewind across restarts
     /// (default true).
     pub record_history: Option<bool>,
+    /// How long recordings are kept, e.g. "7d" or "48h" (default 7d).
+    pub record_keep: Option<String>,
+    /// Size cap for one machine's recordings, MB (default 1024).
+    pub record_max_mb: Option<u64>,
     /// Keys this version doesn't know (from a newer one, or notes): kept on save.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,

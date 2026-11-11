@@ -21,6 +21,7 @@ spilling out of VRAM.
 | Apple Silicon, no sudo, per-process GPU % | partial | ✗ | ✓ |
 | Measured VRAM spill per process | ✗ | ✗ | ✓ |
 | Rewind through recent history, across restarts | ✗ | ✗ | ✓ |
+| Headless recorder with replay | ✗ | ✗ | ✓ |
 | Prometheus / JSON exporter built in | ✗ | separate package | ✓ |
 
 Comparison as of 2026; corrections welcome. ¹ Not yet verified on that
@@ -73,8 +74,23 @@ hardware; see [Platforms](#platforms-and-data-sources).
 - **Events**: timeline of spills, clock limiters, errors, process start/exit.
 - **Rewind**: `<` `>` step back and forth through recent history (`{` `}` 60
   samples, `0` back to live). The whole screen shows that moment: cards,
-  processes, spill state. The last 3600 samples are kept on disk and survive
-  restarts.
+  processes, spill state. The UI records while it runs, so the last hour
+  survives restarts.
+- **Recorder and replay**: `--record` samples and records without the UI
+  (`--serve --record` does both); `--replay` opens a recording in the full
+  UI, positioned at its start: `--replay` (the latest hour), `--replay 2h`
+  (two hours ago), `--replay 14:00`, `--replay "2026-11-10 14:00..15:30"`.
+  `--replay ... --json` prints the recorded snapshots as JSON lines, in the
+  same format as `--json --watch`. `--replay WHEN --once` sums a range up
+  (utilization and power mean/p95/max, busy time, energy, memory and
+  temperature peaks, time spent clock-limited or spilling, the busiest
+  processes, event counts); `--replay A --diff B` puts two ranges side by
+  side, e.g. last night's run against tonight's (`--json` for either). Recordings keep 7 days (`--keep 48h`,
+  at most 1 GB) and take about 2 MB per hour on a desktop with ~50 GPU
+  processes: each file holds a minute-by-minute full snapshot and only what
+  changed in between, gzip-compressed (`.rec` files are valid gzip, of JSON
+  lines). The UI and a recorder can run together: one writes, the other
+  takes over when it stops.
 - **Tuning**: `w` sets the selected GPU's power limit (needs admin/root).
 - **Command palette** (`:`): `theme nord`, `sort cpu`, `filter gpu:0 spill`,
   `hide host`, `show procs`, `procs all`, `charts blocks`, `interval 2`, `gpu 1`,
@@ -192,6 +208,9 @@ omnimon --once              one-shot summary with diagnosis
 omnimon --json [--watch]    snapshot / JSON lines (schema in report.rs)
 omnimon --serve [ADDR]      Prometheus exporter (default 127.0.0.1:9465)
 omnimon --connect HOST      watch another machine running --serve (read-only)
+omnimon --record            record without the UI (--keep 7d, --recordings DIR)
+omnimon --replay [WHEN]     look at a recording: 2h, 14:00, "2026-11-10 14:00..15:00"
+omnimon --replay A --once   sum up a recorded range (--diff B: compare two)
 omnimon --diagnose          what was detected, and why things are missing
 omnimon --demo 8            8 simulated GPUs
 omnimon --graphics sixel    force a graphics protocol (auto|kitty|sixel|iterm2|off)
@@ -208,19 +227,21 @@ Filter syntax: free text plus `gpu:0`, `user:alice`, `pid:1234`,
 `type:c|g|cpu`, `spill`, all ANDed.
 
 Config (`~/.config/omnimon/config.json`, `%APPDATA%\omnimon` on Windows) is
-written on exit. Hand-edit it to rebind keys or turn off the history file:
+written on exit. Hand-edit it to rebind keys, turn off recording from the
+UI, or change how much is kept:
 
 ```json
-{ "keys": { "kill": ["x", "f9"], "quit": ["q"] }, "hidden": ["host"], "record_history": false }
+{ "keys": { "kill": ["x", "f9"], "quit": ["q"] }, "hidden": ["host"],
+  "record_history": false, "record_keep": "3d", "record_max_mb": 500 }
 ```
 
-History (the samples rewind uses, including process command lines) is
-written to the platform state directory: `~/.local/state/omnimon`,
-`~/Library/Application Support/omnimon` on macOS, `%LOCALAPPDATA%\omnimon`
-on Windows.
+Recordings (including process command lines and user names) go to
+`recordings/<host>/` in the platform state directory:
+`~/.local/state/omnimon`, `~/Library/Application Support/omnimon` on macOS,
+`%LOCALAPPDATA%\omnimon` on Windows.
 
 Environment: `OMNIMON_NVML_PATH` (explicit NVML library), `OMNIMON_THEME`,
-`OMNIMON_CONFIG`, `OMNIMON_STATE_DIR` (history location), `OMNIMON_COLOR=256`,
+`OMNIMON_CONFIG`, `OMNIMON_STATE_DIR` (recordings location), `OMNIMON_COLOR=256`,
 `OMNIMON_LOG=debug`.
 
 ## Architecture
@@ -254,11 +275,13 @@ src/
   report.rs        --once / --json / --diagnose; JsonOut schema
   serve.rs         --serve exporter (Prometheus + JSON)
   remote.rs        --connect: a remote --serve as a snapshot source
+  recording/       --record / --replay: compact on-disk format (delta.rs:
+                   field-level deltas), writer with lock and retention, reader
   config.rs        preferences, config/state directories
   ui/              ratatui TUI: state + input (mod.rs, input.rs, filter.rs),
                    procview.rs (process list filter/sort/selection),
                    store.rs (live + rewind snapshots, history, events,
-                   recording via recorder.rs), views (overview, procs, charts,
+                   recording), views (overview, procs, charts,
                    details, timeline, popups), gfx.rs (pixel/block/braille
                    charts), themes
 ```

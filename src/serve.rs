@@ -13,7 +13,14 @@ use crate::collector::{Collector, Sampler};
 use crate::model::{GpuSample, ProcRow, Snapshot, SpillLevel, SystemInfo};
 use crate::report::JsonOut;
 
-pub fn run(collector: Collector, info: SystemInfo, interval: Duration, addr: &str, cfg: &crate::config::Config) -> anyhow::Result<()> {
+pub fn run(
+    collector: Collector,
+    info: SystemInfo,
+    interval: Duration,
+    addr: &str,
+    cfg: &crate::config::Config,
+    mut record: Option<crate::recording::Writer>,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr)?;
     eprintln!("{APP_NAME} {APP_VERSION}: serving http://{}/metrics and /json", listener.local_addr()?);
     let latest: Arc<Mutex<Option<Snapshot>>> = Arc::new(Mutex::new(None));
@@ -24,6 +31,9 @@ pub fn run(collector: Collector, info: SystemInfo, interval: Duration, addr: &st
         std::thread::spawn(move || {
             while let Ok(s) = sampler.rx.recv() {
                 alerts.handle(&s.events);
+                if let Some(w) = &mut record {
+                    crate::recording::report_note(w.write(&crate::recording::trimmed(&s)));
+                }
                 *latest.lock().unwrap() = Some(s);
             }
         });

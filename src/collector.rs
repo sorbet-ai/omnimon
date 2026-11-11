@@ -51,7 +51,7 @@ impl Collector {
         // A demo shows a made-up machine, not this one (demos end up in
         // screenshots and bug reports).
         if !info.gpus.is_empty() && info.gpus.iter().all(|g| g.vendor == Vendor::Demo) {
-            info.host.hostname = "gpu-node-01".into();
+            info.host.hostname = crate::backend::demo::HOSTNAME.into();
             info.host.cpu_brand = "Demo CPU".into();
             info.host.cpu_cores = crate::backend::demo::HOST_CORES;
             info.host.container = None;
