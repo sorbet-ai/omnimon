@@ -3,7 +3,8 @@
 
 /// Binary / package name, e.g. `omnimon`.
 pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
-pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Package version, plus `+<tag>` when the build sets one, e.g. nightlies (build.rs).
+pub const APP_VERSION: &str = env!("APP_VERSION");
 
 /// Name of an environment variable namespaced to this app: `env_var("NVML_PATH")`
 /// gives `OMNIMON_NVML_PATH`.

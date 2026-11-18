@@ -22,6 +22,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Nightly version tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: echo "OMNIMON_BUILD=nightly.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -79,3 +83,51 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+
+  # A rolling "nightly" prerelease of the latest main, so the newest code
+  # installs with one line:
+  #   curl -fsSL https://github.com/sorbet-ai/omnimon/releases/download/nightly/install.sh | sh
+  # Prereleases never become /releases/latest, so the stable one-liner is unaffected.
+  nightly:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: nightly
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and installers (defaulting to nightly)
+        run: |
+          cd dist
+          sha256sum omnimon-* > SHA256SUMS
+          sed 's/^DEFAULT_VERSION="latest"/DEFAULT_VERSION="nightly"/' ../install.sh > install.sh
+          sed "s/^\$defaultVersion = 'latest'/\$defaultVersion = 'nightly'/" ../install.ps1 > install.ps1
+          grep -q '^DEFAULT_VERSION="nightly"' install.sh
+          grep -q "^\$defaultVersion = 'nightly'" install.ps1
+      - name: Replace the nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short=${GITHUB_SHA::7}
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/nightly"
+          {
+            echo "Latest build of main ($short, $(date -u +%F)), rebuilt on every push."
+            echo
+            echo '```sh'
+            echo "curl -fsSL $url/install.sh | sh"
+            echo '```'
+            echo
+            echo '```powershell'
+            echo "irm $url/install.ps1 | iex"
+            echo '```'
+          } > notes.md
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly dist/* --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Nightly ($short)" --notes-file notes.md

@@ -2,8 +2,13 @@
 #
 #   irm https://github.com/sorbet-ai/omnimon/releases/latest/download/install.ps1 | iex
 #
+# The latest build of main (rebuilt on every push):
+#
+#   irm https://github.com/sorbet-ai/omnimon/releases/download/nightly/install.ps1 | iex
+#
 # Environment:
-#   OMNIMON_VERSION      release to install, e.g. 0.1.1 (default: latest)
+#   OMNIMON_VERSION      release to install: e.g. 0.1.1, "latest" or "nightly"
+#                        (default: latest)
 #   OMNIMON_INSTALL_DIR  where to put omnimon.exe
 #                        (default: %LOCALAPPDATA%\Programs\omnimon)
 #   OMNIMON_DOWNLOAD_URL base URL to download from instead of GitHub (mirrors,
@@ -16,15 +21,20 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $repo = 'sorbet-ai/omnimon'
+# The nightly release ships a copy of this script with this set to 'nightly'.
+$defaultVersion = 'latest'
 # x64 build; it also runs on Windows on ARM through emulation.
 $asset = 'omnimon-x86_64-pc-windows-msvc.exe'
 
+$version = if ($env:OMNIMON_VERSION) { $env:OMNIMON_VERSION } else { $defaultVersion }
 if ($env:OMNIMON_DOWNLOAD_URL) {
     $base = $env:OMNIMON_DOWNLOAD_URL.TrimEnd('/')
-} elseif ($env:OMNIMON_VERSION) {
-    $base = "https://github.com/$repo/releases/download/v$($env:OMNIMON_VERSION.TrimStart('v'))"
-} else {
+} elseif ($version -eq 'latest') {
     $base = "https://github.com/$repo/releases/latest/download"
+} elseif ($version -eq 'nightly') {
+    $base = "https://github.com/$repo/releases/download/nightly"
+} else {
+    $base = "https://github.com/$repo/releases/download/v$($version.TrimStart('v'))"
 }
 if ($env:OMNIMON_INSTALL_DIR) {
     $dir = $env:OMNIMON_INSTALL_DIR
@@ -67,8 +77,8 @@ try {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
-$version = & $dest --version
-Write-Host "installed $version to $dest"
+$installed = & $dest --version
+Write-Host "installed $installed to $dest"
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not (($userPath -split ';') -contains $dir)) {

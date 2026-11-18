@@ -172,9 +172,21 @@ irm https://github.com/sorbet-ai/omnimon/releases/latest/download/install.ps1 | 
 ```
 
 The scripts pick the right binary for the OS and CPU, check it against the
-release's `SHA256SUMS`, and put it in `~/.local/bin` (`/usr/local/bin` as
-root) or `%LOCALAPPDATA%\Programs\omnimon`. `OMNIMON_VERSION` and
+release's `SHA256SUMS`, put it in `~/.local/bin` (`/usr/local/bin` as root)
+or `%LOCALAPPDATA%\Programs\omnimon`, and add that to your PATH if it isn't
+there yet (`OMNIMON_NO_MODIFY_PATH=1` to skip). `OMNIMON_VERSION` and
 `OMNIMON_INSTALL_DIR` override the version and location.
+
+The latest build of `main`, rebuilt on every push (`--version` shows the
+commit, e.g. `0.1.3+nightly.f5b630f`):
+
+```sh
+curl -fsSL https://github.com/sorbet-ai/omnimon/releases/download/nightly/install.sh | sh
+```
+
+```powershell
+irm https://github.com/sorbet-ai/omnimon/releases/download/nightly/install.ps1 | iex
+```
 
 Or with a package manager:
 

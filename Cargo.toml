@@ -13,7 +13,7 @@ readme = "README.md"
 keywords = ["gpu", "monitor", "nvidia", "tui", "nvml"]
 categories = ["command-line-utilities", "hardware-support"]
 # Keep the published crate to what builds and tests it.
-include = ["src/**/*", "tests/fixtures/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "rustfmt.toml"]
+include = ["build.rs", "src/**/*", "tests/fixtures/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "rustfmt.toml"]
 
 # `cargo binstall omnimon` downloads the release binary instead of building.
 [package.metadata.binstall]

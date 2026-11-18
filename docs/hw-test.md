@@ -15,9 +15,12 @@ the steps below take about 30 minutes and cover all three.
 
 ## Steps
 
-Install with `cargo install omnimon`, or download
-`omnimon-x86_64-unknown-linux-gnu` from the latest
-[release](https://github.com/sorbet-ai/omnimon/releases) and `chmod +x` it.
+Install the latest build:
+
+```sh
+curl -fsSL https://github.com/sorbet-ai/omnimon/releases/download/nightly/install.sh | sh
+```
+
 Then:
 
 ```sh
