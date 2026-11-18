@@ -311,7 +311,7 @@ impl Host {
         cands.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)));
         let mut pick: Vec<u32> = cands.iter().take(HOST_PROCS_BY_CPU).map(|c| c.0).collect();
         let by_cpu: HashSet<u32> = pick.iter().copied().collect();
-        cands.sort_by(|a, b| b.2.cmp(&a.2));
+        cands.sort_by_key(|c| std::cmp::Reverse(c.2));
         pick.extend(cands.iter().map(|c| c.0).filter(|p| !by_cpu.contains(p)).take(HOST_PROCS_BY_RAM));
 
         let mut rows = Vec::with_capacity(pick.len());
